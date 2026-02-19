@@ -1,28 +1,38 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Bounds, Center, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import {
   Box,
   Camera,
   Check,
+  ChevronDown,
+  ChevronRight,
   Circle,
   Clipboard,
   Code2,
   Download,
   Globe2,
   Lightbulb,
+  Layers3,
   PanelLeft,
   Plus,
+  RotateCcw,
+  Redo2,
   Save,
   Settings2,
   Trash2,
+  Undo2,
   Upload,
   X,
 } from "lucide-react";
 import * as THREE from "three";
+import type {
+  OrbitControls as OrbitControlsImpl,
+} from "three-stdlib";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,14 +45,7 @@ import { cn } from "@/lib/utils";
 
 type ViewerSettings = {
   backgroundColor: string;
-  fogColor: string;
-  showFog: boolean;
-  fogNear: number;
-  fogFar: number;
   showGrid: boolean;
-  gridSize: number;
-  gridDivisions: number;
-  gridFadeDistance: number;
   useAmbientLight: boolean;
   ambientIntensity: number;
   useDirectionalLight: boolean;
@@ -50,11 +53,8 @@ type ViewerSettings = {
   directionalX: number;
   directionalY: number;
   directionalZ: number;
-  orbitEnablePan: boolean;
   orbitEnableZoom: boolean;
   orbitAutoRotate: boolean;
-  orbitDamping: number;
-  cameraFov: number;
 };
 
 type PointLightConfig = {
@@ -74,31 +74,39 @@ type ConfigPayload = {
   pointLights: PointLightConfig[];
 };
 
+type LayerItem = {
+  id: string;
+  name: string;
+  type: string;
+  depth: number;
+  visible: boolean;
+  position: { x: number; y: number; z: number };
+  worldPosition: { x: number; y: number; z: number };
+};
+
+type LayerSnapshot = Record<
+  string,
+  {
+    visible: boolean;
+    position: { x: number; y: number; z: number };
+  }
+>;
+
 const MAX_POINT_LIGHTS = 4;
 const CONFIG_STORAGE_KEY = "glb_tool_viewer_config_v1";
 
 const DEFAULT_SETTINGS: ViewerSettings = {
   backgroundColor: "#0b0f13",
-  fogColor: "#b8c3d1",
-  showFog: false,
-  fogNear: 1,
-  fogFar: 10,
   showGrid: true,
-  gridSize: 20,
-  gridDivisions: 20,
-  gridFadeDistance: 30,
-  useAmbientLight: false,
-  ambientIntensity: 0.4,
+  useAmbientLight: true,
+  ambientIntensity: 2,
   useDirectionalLight: false,
   directionalIntensity: 1,
   directionalX: 5,
   directionalY: 6,
   directionalZ: 4,
-  orbitEnablePan: true,
   orbitEnableZoom: true,
   orbitAutoRotate: false,
-  orbitDamping: 45,
-  cameraFov: 45,
 };
 
 function createDefaultPointLight(index: number): PointLightConfig {
@@ -268,19 +276,83 @@ function ToggleField({
   );
 }
 
-function clampSettings(raw: ViewerSettings): ViewerSettings {
-  const fogNear = THREE.MathUtils.clamp(raw.fogNear, 0.1, 50);
-  const fogFar = Math.max(fogNear + 0.1, THREE.MathUtils.clamp(raw.fogFar, fogNear + 0.1, 200));
+function ScrubbableNumberField({
+  label,
+  value,
+  onBeginChange,
+  onValueChange,
+}: {
+  label: string;
+  value: number;
+  onBeginChange?: () => void;
+  onValueChange: (value: number) => void;
+}) {
+  const dragRef = useRef<{ startX: number; startValue: number; active: boolean } | null>(null);
+  const typingRef = useRef(false);
 
+  const startDrag = (event: React.PointerEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    onBeginChange?.();
+    dragRef.current = {
+      startX: event.clientX,
+      startValue: value,
+      active: true,
+    };
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      const delta = moveEvent.clientX - drag.startX;
+      const next = Number((drag.startValue + delta * 0.005).toFixed(3));
+      onValueChange(next);
+    };
+
+    const handleUp = () => {
+      if (dragRef.current) dragRef.current.active = false;
+      dragRef.current = null;
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+  };
+
+  return (
+    <div className="space-y-1">
+      <span
+        className="inline-block cursor-ew-resize select-none text-[11px] text-muted-foreground"
+        title="Drag left/right to change value"
+        onPointerDown={startDrag}
+      >
+        {label}
+      </span>
+      <Input
+        type="number"
+        step="0.01"
+        value={value}
+        onChange={(event) => {
+          const parsed = Number(event.target.value);
+          if (Number.isNaN(parsed)) return;
+          if (!typingRef.current) {
+            onBeginChange?.();
+            typingRef.current = true;
+          }
+          onValueChange(parsed);
+        }}
+        onBlur={() => {
+          typingRef.current = false;
+        }}
+      />
+    </div>
+  );
+}
+
+function clampSettings(raw: ViewerSettings): ViewerSettings {
   return {
     ...raw,
-    cameraFov: THREE.MathUtils.clamp(raw.cameraFov, 20, 100),
-    orbitDamping: THREE.MathUtils.clamp(raw.orbitDamping, 0, 100),
-    gridSize: THREE.MathUtils.clamp(raw.gridSize, 2, 200),
-    gridDivisions: THREE.MathUtils.clamp(raw.gridDivisions, 2, 300),
-    gridFadeDistance: THREE.MathUtils.clamp(raw.gridFadeDistance, 1, 200),
-    fogNear,
-    fogFar,
+    ambientIntensity: THREE.MathUtils.clamp(raw.ambientIntensity, 0, 3),
+    directionalIntensity: THREE.MathUtils.clamp(raw.directionalIntensity, 0, 5),
   };
 }
 
@@ -298,34 +370,112 @@ function sanitizePointLight(input: PointLightConfig, i: number): PointLightConfi
   };
 }
 
+function getObjectPositionInfo(object: THREE.Object3D) {
+  const world = new THREE.Vector3();
+  object.getWorldPosition(world);
+  return {
+    position: {
+      x: Number(object.position.x.toFixed(3)),
+      y: Number(object.position.y.toFixed(3)),
+      z: Number(object.position.z.toFixed(3)),
+    },
+    worldPosition: {
+      x: Number(world.x.toFixed(3)),
+      y: Number(world.y.toFixed(3)),
+      z: Number(world.z.toFixed(3)),
+    },
+  };
+}
+
+function isTransformableLayer(object: THREE.Object3D): boolean {
+  if (object.type === "Bone") return false;
+  if (object.type === "SkeletonHelper") return false;
+  if (object.type === "Camera") return false;
+  return true;
+}
+
+function getLayerItems(scene: THREE.Object3D): {
+  items: LayerItem[];
+  objectMap: Map<string, THREE.Object3D>;
+} {
+  const items: LayerItem[] = [];
+  const objectMap = new Map<string, THREE.Object3D>();
+  let unnamedCounter = 1;
+
+  scene.traverse((object) => {
+    if (object === scene) return;
+    if (!isTransformableLayer(object)) return;
+
+    const depth = (() => {
+      let d = 0;
+      let current: THREE.Object3D | null = object.parent;
+      while (current && current !== scene) {
+        d += 1;
+        current = current.parent;
+      }
+      return d;
+    })();
+
+    const name =
+      object.name.trim().length > 0 ? object.name : `${object.type} ${unnamedCounter++}`;
+    const item: LayerItem = {
+      id: object.uuid,
+      name,
+      type: object.type,
+      depth,
+      visible: object.visible,
+      ...getObjectPositionInfo(object),
+    };
+    items.push(item);
+    objectMap.set(item.id, object);
+  });
+
+  return { items, objectMap };
+}
+
 export function GlbViewer() {
   const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [configMessage, setConfigMessage] = useState<string | null>(null);
+  const [layerMessage, setLayerMessage] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showCustomize, setShowCustomize] = useState(false);
-  const [showUploadSidebar, setShowUploadSidebar] = useState(true);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [layersOpen, setLayersOpen] = useState(true);
   const [settings, setSettings] = useState<ViewerSettings>(DEFAULT_SETTINGS);
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
+  const [layerItems, setLayerItems] = useState<LayerItem[]>([]);
+  const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  const [layerDetailsOpen, setLayerDetailsOpen] = useState<Record<string, boolean>>({});
   const [configText, setConfigText] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
+  const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const loadIdRef = useRef(0);
+  const layerObjectMapRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  const orbitControlsRef = useRef<OrbitControlsImpl | null>(null);
+  const undoStackRef = useRef<LayerSnapshot[]>([]);
+  const redoStackRef = useRef<LayerSnapshot[]>([]);
 
   const hasModel = modelScene !== null;
-  const orbitDampingFactor = useMemo(
-    () => THREE.MathUtils.lerp(0.01, 0.35, settings.orbitDamping / 100),
-    [settings.orbitDamping]
-  );
 
   useEffect(() => {
     if (configDirty) return;
     const text = JSON.stringify({ settings, pointLights }, null, 2);
     setConfigText(text);
   }, [settings, pointLights, configDirty]);
+
+  const selectLayer = (layerId: string) => {
+    if (!layerObjectMapRef.current.get(layerId)) {
+      setSelectedLayerId(null);
+      return;
+    }
+    setSelectedLayerId(layerId);
+  };
 
   const loadFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".glb")) {
@@ -354,8 +504,18 @@ export function GlbViewer() {
         (gltf) => {
           if (loadId !== loadIdRef.current) return;
           setModelScene(gltf.scene);
+          const { items, objectMap } = getLayerItems(gltf.scene);
+          setLayerItems(items);
+          layerObjectMapRef.current = objectMap;
+          setSelectedLayerId(null);
+          setLayerDetailsOpen({});
+          undoStackRef.current = [];
+          redoStackRef.current = [];
+          setUndoCount(0);
+          setRedoCount(0);
           if (previousScene) disposeScene(previousScene);
-          setShowUploadSidebar(false);
+          setUploadOpen(false);
+          setLayersOpen(true);
           setIsLoading(false);
         },
         (error) => {
@@ -473,33 +633,326 @@ export function GlbViewer() {
         ? "error"
         : null;
 
+  const captureLayerSnapshot = (): LayerSnapshot => {
+    const snapshot: LayerSnapshot = {};
+    layerObjectMapRef.current.forEach((object, id) => {
+      snapshot[id] = {
+        visible: object.visible,
+        position: {
+          x: object.position.x,
+          y: object.position.y,
+          z: object.position.z,
+        },
+      };
+    });
+    return snapshot;
+  };
+
+  const refreshLayerItemsFromScene = () => {
+    setLayerItems((prev) =>
+      prev.map((layer) => {
+        const object = layerObjectMapRef.current.get(layer.id);
+        if (!object) return layer;
+        return {
+          ...layer,
+          visible: object.visible,
+          ...getObjectPositionInfo(object),
+        };
+      })
+    );
+  };
+
+  const pushHistory = () => {
+    undoStackRef.current = [...undoStackRef.current.slice(-9), captureLayerSnapshot()];
+    redoStackRef.current = [];
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+  };
+
+  const applyLayerSnapshot = (snapshot: LayerSnapshot) => {
+    Object.entries(snapshot).forEach(([id, value]) => {
+      const object = layerObjectMapRef.current.get(id);
+      if (!object) return;
+      object.visible = value.visible;
+      object.position.set(value.position.x, value.position.y, value.position.z);
+      object.updateMatrixWorld();
+    });
+    refreshLayerItemsFromScene();
+  };
+
+  const undoLayerChange = () => {
+    const previous = undoStackRef.current.at(-1);
+    if (!previous) return;
+    const current = captureLayerSnapshot();
+    undoStackRef.current = undoStackRef.current.slice(0, -1);
+    redoStackRef.current = [...redoStackRef.current.slice(-9), current];
+    applyLayerSnapshot(previous);
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+  };
+
+  const redoLayerChange = () => {
+    const next = redoStackRef.current.at(-1);
+    if (!next) return;
+    const current = captureLayerSnapshot();
+    redoStackRef.current = redoStackRef.current.slice(0, -1);
+    undoStackRef.current = [...undoStackRef.current.slice(-9), current];
+    applyLayerSnapshot(next);
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+  };
+
+  const resetLayerChanges = () => {
+    const baseline = undoStackRef.current[0];
+    if (!baseline) return;
+    pushHistory();
+    applyLayerSnapshot(baseline);
+  };
+
+  const deleteLayer = (layerId: string) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object || !object.parent) return;
+
+    const idsToDelete: string[] = [];
+    object.traverse((child) => {
+      idsToDelete.push(child.uuid);
+    });
+    object.parent.remove(object);
+
+    idsToDelete.forEach((id) => {
+      layerObjectMapRef.current.delete(id);
+    });
+
+    setLayerItems((prev) => prev.filter((layer) => !idsToDelete.includes(layer.id)));
+    setLayerDetailsOpen((prev) => {
+      const next = { ...prev };
+      idsToDelete.forEach((id) => {
+        delete next[id];
+      });
+      return next;
+    });
+
+    if (selectedLayerId && idsToDelete.includes(selectedLayerId)) {
+      setSelectedLayerId(null);
+    }
+
+    // Structural change invalidates prior snapshots.
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    setUndoCount(0);
+    setRedoCount(0);
+    setLayerMessage("Layer deleted.");
+  };
+
+  const setLayerVisibility = (layerId: string, visible: boolean) => {
+    pushHistory();
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object) return;
+    object.visible = visible;
+    if (!visible && selectedLayerId === layerId) {
+      setSelectedLayerId(null);
+    }
+    setLayerItems((prev) =>
+      prev.map((layer) => (layer.id === layerId ? { ...layer, visible } : layer))
+    );
+  };
+
+  const syncLayerPosition = (layerId: string) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object) return;
+    const info = getObjectPositionInfo(object);
+    setLayerItems((prev) =>
+      prev.map((layer) => (layer.id === layerId ? { ...layer, ...info } : layer))
+    );
+  };
+
+  const updateLayerCoordinate = (
+    layerId: string,
+    axis: "x" | "y" | "z",
+    rawValue: string,
+    options?: { recordHistory?: boolean }
+  ) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object) return;
+    const value = Number(rawValue);
+    if (Number.isNaN(value)) return;
+    if (options?.recordHistory !== false) {
+      pushHistory();
+    }
+    object.position[axis] = value;
+    object.updateMatrixWorld();
+    syncLayerPosition(layerId);
+  };
+
+  const exportCurrentModel = () => {
+    if (!modelScene) return;
+    const exporter = new GLTFExporter();
+    const clone = modelScene.clone(true);
+
+    exporter.parse(
+      clone,
+      (result) => {
+        let blob: Blob;
+        let fileName = "model-export.glb";
+
+        if (result instanceof ArrayBuffer) {
+          blob = new Blob([result], { type: "model/gltf-binary" });
+        } else {
+          blob = new Blob([JSON.stringify(result, null, 2)], {
+            type: "application/json",
+          });
+          fileName = "model-export.gltf";
+        }
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        setLayerMessage("Model exported.");
+      },
+      () => {
+        setLayerMessage("Failed to export model.");
+      },
+      { binary: true, onlyVisible: false, includeCustomExtensions: true }
+    );
+  };
+
   const uploadPanel = (
-    <Card
+    <div
       className={cn(
-        "border-dashed bg-card/95 backdrop-blur transition",
+        "space-y-3 rounded-md border border-dashed p-3 transition",
         isDragging ? "border-primary" : "border-border"
       )}
     >
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Upload className="h-4 w-4" />
-          Upload .glb
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-3">
-        <p className="text-xs text-muted-foreground">Drag/drop a file or pick one from disk.</p>
-        <Button size="sm" variant="secondary" onClick={() => inputRef.current?.click()}>
-          Select .glb file
-        </Button>
-        <input ref={inputRef} type="file" accept=".glb" onChange={onFilePick} className="hidden" />
-        {fileName ? (
-          <p className="text-xs text-muted-foreground">
-            {isLoading ? "Loading" : "Loaded"}: {fileName}
-          </p>
-        ) : null}
-        {errorMessage ? <p className="text-xs text-red-600">{errorMessage}</p> : null}
-      </CardContent>
-    </Card>
+      <p className="text-xs text-muted-foreground">Drag/drop a file or pick one from disk.</p>
+      <Button size="sm" variant="secondary" onClick={() => inputRef.current?.click()}>
+        Select .glb file
+      </Button>
+      <input ref={inputRef} type="file" accept=".glb" onChange={onFilePick} className="hidden" />
+      {fileName ? (
+        <p className="text-xs text-muted-foreground">
+          {isLoading ? "Loading" : "Loaded"}: {fileName}
+        </p>
+      ) : null}
+      {errorMessage ? <p className="text-xs text-red-600">{errorMessage}</p> : null}
+    </div>
+  );
+
+  const layersPanel = (
+    <div className="space-y-3">
+      {layerItems.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No layers found for this model.</p>
+      ) : (
+        <div className="max-h-[60vh] space-y-1 overflow-y-auto pr-1">
+            {layerItems.map((layer) => (
+              <div key={layer.id} className="space-y-1">
+                <div
+                  className={cn(
+                    "flex items-center justify-between rounded-md border px-2 py-1.5",
+                    selectedLayerId === layer.id ? "border-primary bg-primary/5" : ""
+                  )}
+                  style={{ marginLeft: `${Math.min(layer.depth, 6) * 10}px` }}
+                >
+                  <button
+                    type="button"
+                    className="min-w-0 text-left"
+                    onClick={() => {
+                      selectLayer(layer.id);
+                    }}
+                  >
+                    <p className="truncate text-xs font-medium">{layer.name}</p>
+                    <p className="text-[11px] text-muted-foreground">{layer.type}</p>
+                  </button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setLayerDetailsOpen((prev) => ({
+                          ...prev,
+                          [layer.id]: !prev[layer.id],
+                        }));
+                      }}
+                    >
+                      {layerDetailsOpen[layer.id] ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    <Switch
+                      checked={layer.visible}
+                      onCheckedChange={(checked) => setLayerVisibility(layer.id, checked)}
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteLayer(layer.id);
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                {layerDetailsOpen[layer.id] ? (
+                  <div
+                    className="space-y-1 rounded-md border bg-background/70 p-2"
+                    style={{ marginLeft: `${Math.min(layer.depth, 6) * 10}px` }}
+                  >
+                    <p className="text-[11px] text-muted-foreground">
+                      Local: X {layer.position.x}, Y {layer.position.y}, Z {layer.position.z}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      World: X {layer.worldPosition.x}, Y {layer.worldPosition.y}, Z {layer.worldPosition.z}
+                    </p>
+                    <div className="grid grid-cols-3 gap-1 pt-1">
+                      <ScrubbableNumberField
+                        label="X"
+                        value={layer.position.x}
+                        onBeginChange={pushHistory}
+                        onValueChange={(next) =>
+                          updateLayerCoordinate(layer.id, "x", next.toString(), {
+                            recordHistory: false,
+                          })
+                        }
+                      />
+                      <ScrubbableNumberField
+                        label="Y"
+                        value={layer.position.y}
+                        onBeginChange={pushHistory}
+                        onValueChange={(next) =>
+                          updateLayerCoordinate(layer.id, "y", next.toString(), {
+                            recordHistory: false,
+                          })
+                        }
+                      />
+                      <ScrubbableNumberField
+                        label="Z"
+                        value={layer.position.z}
+                        onBeginChange={pushHistory}
+                        onValueChange={(next) =>
+                          updateLayerCoordinate(layer.id, "z", next.toString(), {
+                            recordHistory: false,
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
   );
 
   return (
@@ -515,11 +968,14 @@ export function GlbViewer() {
       <div className="absolute inset-0">
         {hasModel ? (
           <Canvas>
-            <PerspectiveCamera makeDefault position={[2, 2, 2]} fov={settings.cameraFov} />
+            <PerspectiveCamera
+              makeDefault
+              position={[2, 2, 2]}
+              fov={45}
+              near={0.001}
+              far={100000}
+            />
             <color attach="background" args={[settings.backgroundColor]} />
-            {settings.showFog ? (
-              <fog attach="fog" args={[settings.fogColor, settings.fogNear, settings.fogFar]} />
-            ) : null}
 
             {settings.useAmbientLight ? <ambientLight intensity={settings.ambientIntensity} /> : null}
             {settings.useDirectionalLight ? (
@@ -543,33 +999,30 @@ export function GlbViewer() {
 
             <SceneGrid
               show={settings.showGrid}
-              size={settings.gridSize}
-              divisions={settings.gridDivisions}
-              fadeDistance={settings.gridFadeDistance}
+              size={20}
+              divisions={20}
+              fadeDistance={30}
             />
 
-            <Bounds fit clip observe margin={1.1}>
+            <Bounds fit clip={false} observe margin={1.1}>
               <Center>
                 <primitive object={modelScene} dispose={null} />
               </Center>
             </Bounds>
-
             <OrbitControls
+              ref={orbitControlsRef}
               makeDefault
               enableDamping
-              dampingFactor={orbitDampingFactor}
-              enablePan={settings.orbitEnablePan}
+              dampingFactor={0.1}
+              minDistance={0.02}
+              maxDistance={100000}
+              enablePan
               enableZoom={settings.orbitEnableZoom}
               autoRotate={settings.orbitAutoRotate}
             />
           </Canvas>
         ) : (
-          <div className="flex h-full items-center justify-center bg-[#0b0f13] text-sm text-slate-300">
-            <div className="flex items-center gap-2 rounded-lg border border-slate-700/80 bg-slate-900/70 px-4 py-2">
-              <Box className="h-4 w-4" />
-              Drop a model to begin.
-            </div>
-          </div>
+          <div className="h-full bg-[#0b0f13]" />
         )}
       </div>
 
@@ -579,56 +1032,100 @@ export function GlbViewer() {
 
       {!hasModel ? <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div> : null}
 
-      {hasModel && !showUploadSidebar ? (
-        <Button
-          size="sm"
-          className="absolute left-4 top-4 z-40"
-          variant="secondary"
-          onClick={() => setShowUploadSidebar(true)}
-        >
-          <PanelLeft className="mr-2 h-4 w-4" />
-          Upload
-        </Button>
-      ) : null}
-
-      {hasModel && showUploadSidebar ? (
-        <aside className="absolute left-4 top-4 z-40 w-[340px]">
-          <div className="mb-2 flex items-center justify-end">
-            <Button size="sm" variant="secondary" onClick={() => setShowUploadSidebar(false)}>
-              <X className="h-4 w-4" />
+      {hasModel ? (
+        <aside className="absolute left-4 top-4 z-40 w-[340px] space-y-2">
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={undoLayerChange}
+              disabled={undoCount === 0}
+            >
+              <Undo2 className="mr-2 h-4 w-4" />
+              Undo
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={resetLayerChanges}
+              disabled={undoCount === 0}
+            >
+              <RotateCcw className="mr-2 h-4 w-4" />
+              Reset
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={redoLayerChange}
+              disabled={redoCount === 0}
+            >
+              <Redo2 className="mr-2 h-4 w-4" />
+              Redo
+            </Button>
+            <Button size="sm" variant="secondary" onClick={exportCurrentModel}>
+              <Download className="mr-2 h-4 w-4" />
+              Export
             </Button>
           </div>
-          {uploadPanel}
+          {layerMessage ? <p className="text-xs text-muted-foreground">{layerMessage}</p> : null}
+
+          <Card className="bg-card/95 backdrop-blur">
+            <CardHeader className="py-3">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full justify-between"
+                onClick={() => setUploadOpen((prev) => !prev)}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <PanelLeft className="h-4 w-4" />
+                  Upload
+                </span>
+                {uploadOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </Button>
+            </CardHeader>
+            {uploadOpen ? <CardContent className="pt-0">{uploadPanel}</CardContent> : null}
+          </Card>
+
+          <Card className="bg-card/95 backdrop-blur">
+            <CardHeader className="py-3">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full justify-between"
+                onClick={() => setLayersOpen((prev) => !prev)}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Layers3 className="h-4 w-4" />
+                  Layers
+                </span>
+                {layersOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </Button>
+            </CardHeader>
+            {layersOpen ? <CardContent className="pt-0">{layersPanel}</CardContent> : null}
+          </Card>
         </aside>
       ) : null}
 
       {hasModel ? (
-        <Button
-          size="sm"
-          className="absolute right-4 top-4 z-40"
-          variant="secondary"
-          onClick={() => setShowCustomize((prev) => !prev)}
-        >
-          <Settings2 className="mr-2 h-4 w-4" />
-          Customize
-        </Button>
-      ) : null}
-
-      {hasModel ? (
-        <aside
-          className={cn(
-            "absolute right-0 top-0 z-40 h-full w-full max-w-md overflow-y-auto border-l bg-card/95 p-6 backdrop-blur transition-transform",
-            showCustomize ? "translate-x-0" : "translate-x-full"
-          )}
-        >
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Customize Viewer</h2>
-            <Button size="sm" variant="secondary" onClick={() => setShowCustomize(false)}>
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
-
-          <div className="space-y-6">
+        <aside className="absolute right-4 top-4 z-40 w-full max-w-md">
+          <Card className="bg-card/95 backdrop-blur">
+            <CardHeader className="py-3">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full justify-between"
+                onClick={() => setShowCustomize((prev) => !prev)}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Settings2 className="h-4 w-4" />
+                  Customize
+                </span>
+                {showCustomize ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </Button>
+            </CardHeader>
+            {showCustomize ? (
+              <CardContent className="max-h-[calc(100vh-7rem)] space-y-6 overflow-y-auto pt-0">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg font-bold">
@@ -643,64 +1140,9 @@ export function GlbViewer() {
                   onChange={(value) => setSettings((p) => ({ ...p, backgroundColor: value }))}
                 />
                 <ToggleField
-                  label="Enable fog"
-                  checked={settings.showFog}
-                  onChange={(v) => setSettings((p) => ({ ...p, showFog: v }))}
-                />
-                <ColorField
-                  label="Fog color"
-                  value={settings.fogColor}
-                  onChange={(value) => setSettings((p) => ({ ...p, fogColor: value }))}
-                />
-                <SliderField
-                  label="Fog near"
-                  value={settings.fogNear}
-                  min={0.1}
-                  max={50}
-                  step={0.1}
-                  onChange={(v) =>
-                    setSettings((p) => clampSettings({ ...p, fogNear: v, fogFar: Math.max(v + 0.1, p.fogFar) }))
-                  }
-                />
-                <SliderField
-                  label="Fog far"
-                  value={settings.fogFar}
-                  min={0.2}
-                  max={200}
-                  step={0.1}
-                  onChange={(v) => setSettings((p) => clampSettings({ ...p, fogFar: v }))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Fog mixes distant model parts into fog color. Lower near/far for stronger effect.
-                </p>
-                <ToggleField
                   label="Show grid"
                   checked={settings.showGrid}
                   onChange={(v) => setSettings((p) => ({ ...p, showGrid: v }))}
-                />
-                <SliderField
-                  label="Grid size"
-                  value={settings.gridSize}
-                  min={2}
-                  max={200}
-                  step={1}
-                  onChange={(v) => setSettings((p) => ({ ...p, gridSize: v }))}
-                />
-                <SliderField
-                  label="Grid divisions"
-                  value={settings.gridDivisions}
-                  min={2}
-                  max={300}
-                  step={1}
-                  onChange={(v) => setSettings((p) => ({ ...p, gridDivisions: v }))}
-                />
-                <SliderField
-                  label="Grid fade distance"
-                  value={settings.gridFadeDistance}
-                  min={1}
-                  max={200}
-                  step={1}
-                  onChange={(v) => setSettings((p) => ({ ...p, gridFadeDistance: v }))}
                 />
               </CardContent>
             </Card>
@@ -709,34 +1151,10 @@ export function GlbViewer() {
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg font-bold">
                   <Camera className="h-5 w-5" />
-                  Camera + Orbit
+                  Navigation
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <SliderField
-                  label="Camera FOV"
-                  value={settings.cameraFov}
-                  min={20}
-                  max={100}
-                  step={1}
-                  onChange={(v) => setSettings((p) => ({ ...p, cameraFov: v }))}
-                />
-                <SliderField
-                  label="Orbit smoothing"
-                  value={settings.orbitDamping}
-                  min={0}
-                  max={100}
-                  step={1}
-                  onChange={(v) => setSettings((p) => ({ ...p, orbitDamping: v }))}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Smoothing maps to damping factor {orbitDampingFactor.toFixed(3)}.
-                </p>
-                <ToggleField
-                  label="Enable pan"
-                  checked={settings.orbitEnablePan}
-                  onChange={(v) => setSettings((p) => ({ ...p, orbitEnablePan: v }))}
-                />
                 <ToggleField
                   label="Enable zoom"
                   checked={settings.orbitEnableZoom}
@@ -959,7 +1377,9 @@ export function GlbViewer() {
                 ) : null}
               </CardFooter>
             </Card>
-          </div>
+              </CardContent>
+            ) : null}
+          </Card>
         </aside>
       ) : null}
     </div>
