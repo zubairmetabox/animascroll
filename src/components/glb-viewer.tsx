@@ -603,6 +603,11 @@ export function GlbViewer() {
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
   const [layerItems, setLayerItems] = useState<LayerItem[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  const [layerContextMenu, setLayerContextMenu] = useState<{
+    layerId: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [layerDetailsOpen, setLayerDetailsOpen] = useState<Record<string, boolean>>({});
@@ -624,6 +629,8 @@ export function GlbViewer() {
   const pendingTransformLayerIdsRef = useRef<Set<string>>(new Set());
   const pendingScaleLayerIdsRef = useRef<Set<string>>(new Set());
   const pendingRotationLayerIdsRef = useRef<Set<string>>(new Set());
+  const undoActionRef = useRef<() => void>(() => {});
+  const redoActionRef = useRef<() => void>(() => {});
 
   const hasModel = modelScene !== null;
   const undoCount = historyIndex;
@@ -662,6 +669,17 @@ export function GlbViewer() {
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [hasUnsavedChanges]);
+
+  useEffect(() => {
+    if (!layerContextMenu) return;
+    const closeMenu = () => setLayerContextMenu(null);
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [layerContextMenu]);
 
   const patchSettings = (patch: Partial<ViewerSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
@@ -994,6 +1012,51 @@ export function GlbViewer() {
     jumpToHistoryIndex(0);
   };
 
+  useEffect(() => {
+    undoActionRef.current = undoLayerChange;
+    redoActionRef.current = redoLayerChange;
+  });
+
+  useEffect(() => {
+    const isTypingElement = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      return (
+        el.isContentEditable ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT"
+      );
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!hasModel) return;
+      if (isTypingElement(event.target)) return;
+      const key = event.key.toLowerCase();
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) return;
+
+      if (key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          redoActionRef.current();
+          return;
+        }
+        undoActionRef.current();
+        return;
+      }
+
+      if (key === "y") {
+        event.preventDefault();
+        redoActionRef.current();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [hasModel]);
+
   const deleteLayer = (layerId: string) => {
     const object = layerObjectMapRef.current.get(layerId);
     if (!object) return;
@@ -1019,7 +1082,28 @@ export function GlbViewer() {
     }
     refreshLayerItemsFromScene();
     pushHistory(`Delete: ${layerName}`);
-    setLayerMessage("Layer deleted.");
+  };
+
+  const duplicateLayer = (layerId: string) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object || !object.parent || !modelScene) return;
+    const layerName = getLayerName(layerId);
+    const originalBounds = new THREE.Box3().setFromObject(object);
+    const originalSize = new THREE.Vector3();
+    originalBounds.getSize(originalSize);
+    const offset = Math.max(Math.max(originalSize.x, originalSize.y, originalSize.z) * 0.15, 0.05);
+
+    const clone = object.clone(true);
+    clone.name = `${layerName} Copy`;
+    clone.position.x += offset;
+    object.parent.add(clone);
+    clone.updateMatrixWorld(true);
+
+    const { items, objectMap } = getLayerItems(modelScene);
+    setLayerItems(items);
+    layerObjectMapRef.current = objectMap;
+    setLayerMessage("Layer duplicated.");
+    pushHistory(`Duplicate: ${layerName}`);
   };
 
   const setLayerVisibility = (layerId: string, visible: boolean) => {
@@ -1281,6 +1365,15 @@ export function GlbViewer() {
                     selectedLayerId === layer.id ? "border-primary bg-primary/5" : ""
                   )}
                   style={{ marginLeft: `${Math.min(layer.depth, 6) * 10}px` }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setLayerContextMenu({
+                      layerId: layer.id,
+                      x: event.clientX,
+                      y: event.clientY,
+                    });
+                  }}
                 >
                   <button
                     type="button"
@@ -1313,10 +1406,14 @@ export function GlbViewer() {
                         className="h-7 w-full text-xs"
                       />
                     ) : (
-                      <p className="truncate text-xs font-medium">{layer.name}</p>
+                      <p className="truncate text-xs font-medium" title={layer.name}>
+                        {layer.name}
+                      </p>
                     )}
                     {renamingLayerId === layer.id ? null : (
-                      <p className="truncate text-[11px] text-muted-foreground">{layer.type}</p>
+                      <p className="truncate text-[11px] text-muted-foreground" title={layer.type}>
+                        {layer.type}
+                      </p>
                     )}
                   </button>
                   <div className="flex items-center gap-1">
@@ -2011,6 +2108,25 @@ export function GlbViewer() {
             ) : null}
           </Card>
         </aside>
+      ) : null}
+
+      {layerContextMenu ? (
+        <div
+          className="fixed z-50 min-w-[180px] rounded-md border border-border bg-card p-1 shadow-lg"
+          style={{ left: layerContextMenu.x, top: layerContextMenu.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-foreground hover:bg-accent"
+            onClick={() => {
+              duplicateLayer(layerContextMenu.layerId);
+              setLayerContextMenu(null);
+            }}
+          >
+            Duplicate layer
+          </button>
+        </div>
       ) : null}
     </div>
   );
