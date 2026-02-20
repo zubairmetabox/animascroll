@@ -15,6 +15,7 @@ import {
   Clipboard,
   Code2,
   Download,
+  Diamond,
   Globe2,
   History,
   Lightbulb,
@@ -109,8 +110,33 @@ type HistoryEntry = {
   snapshot: LayerSnapshot;
 };
 
+type ViewMode = "edit" | "animate";
+
+type CameraView = {
+  position: [number, number, number];
+  target: [number, number, number];
+  fov: number;
+  zoom: number;
+};
+
 const MAX_POINT_LIGHTS = 4;
 const CONFIG_STORAGE_KEY = "glb_tool_viewer_config_v1";
+const DEFAULT_CAMERA_VIEW: CameraView = {
+  position: [2, 2, 2],
+  target: [0, 0, 0],
+  fov: 45,
+  zoom: 1,
+};
+const TIMELINE_PROPERTIES = [
+  { id: "position.x", label: "Position X" },
+  { id: "position.y", label: "Position Y" },
+  { id: "position.z", label: "Position Z" },
+  { id: "rotation.x", label: "Rotation X" },
+  { id: "rotation.y", label: "Rotation Y" },
+  { id: "rotation.z", label: "Rotation Z" },
+  { id: "scale.uniform", label: "Scale" },
+  { id: "opacity", label: "Opacity" },
+] as const;
 
 const DEFAULT_SETTINGS: ViewerSettings = {
   backgroundColor: "#0b0f13",
@@ -608,6 +634,14 @@ export function GlbViewer() {
   const [layerMessage, setLayerMessage] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("edit");
+  const [cameraView, setCameraView] = useState<CameraView>(DEFAULT_CAMERA_VIEW);
+  const [timelineLengthVh, setTimelineLengthVh] = useState(200);
+  const [timelineCurrentVh, setTimelineCurrentVh] = useState(0);
+  const [timelineProgress, setTimelineProgress] = useState(0);
+  const [timelineZoom, setTimelineZoom] = useState(1);
+  const [timelineExpandedLayerIds, setTimelineExpandedLayerIds] = useState<Set<string>>(new Set());
+  const [timelinePanelHeight, setTimelinePanelHeight] = useState(260);
   const [showCustomize, setShowCustomize] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -634,7 +668,9 @@ export function GlbViewer() {
   const [historyIndex, setHistoryIndex] = useState(0);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const viewerRef = useRef<HTMLDivElement>(null);
   const loadIdRef = useRef(0);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const layerObjectMapRef = useRef<Map<string, THREE.Object3D>>(new Map());
   const deletedLayerIdsRef = useRef<Set<string>>(new Set());
   const orbitControlsRef = useRef<OrbitControlsImpl | null>(null);
@@ -645,6 +681,13 @@ export function GlbViewer() {
   const pendingRotationLayerIdsRef = useRef<Set<string>>(new Set());
   const undoActionRef = useRef<() => void>(() => {});
   const redoActionRef = useRef<() => void>(() => {});
+  const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const timelineModifierDragRef = useRef<{
+    layerId: string;
+    propertyId: string;
+    startX: number;
+    startValue: number;
+  } | null>(null);
 
   const hasModel = modelScene !== null;
   const undoCount = historyIndex;
@@ -659,6 +702,40 @@ export function GlbViewer() {
   useEffect(() => {
     deletedLayerIdsRef.current = deletedLayerIds;
   }, [deletedLayerIds]);
+
+  useEffect(() => {
+    if (!hasModel) return;
+    if (viewMode !== "animate") return;
+    applyCameraView(cameraView);
+  }, [hasModel, viewMode, cameraView]);
+
+  useEffect(() => {
+    const container = viewerRef.current;
+    if (!container) return;
+
+    const updateTimelineFromScroll = () => {
+      if (viewMode !== "animate") {
+        setTimelineCurrentVh(0);
+        setTimelineProgress(0);
+        return;
+      }
+      const viewportHeight = Math.max(container.clientHeight, 1);
+      const lengthPx = Math.max((timelineLengthVh / 100) * viewportHeight, 1);
+      const scrollTop = container.scrollTop;
+      const currentVh = THREE.MathUtils.clamp((scrollTop / viewportHeight) * 100, 0, timelineLengthVh);
+      const progress = THREE.MathUtils.clamp(scrollTop / lengthPx, 0, 1);
+      setTimelineCurrentVh(Number(currentVh.toFixed(2)));
+      setTimelineProgress(progress);
+    };
+
+    updateTimelineFromScroll();
+    container.addEventListener("scroll", updateTimelineFromScroll, { passive: true });
+    window.addEventListener("resize", updateTimelineFromScroll);
+    return () => {
+      container.removeEventListener("scroll", updateTimelineFromScroll);
+      window.removeEventListener("resize", updateTimelineFromScroll);
+    };
+  }, [timelineLengthVh, viewMode]);
 
   const commitHistoryState = (entries: HistoryEntry[], index: number) => {
     historyEntriesRef.current = entries;
@@ -695,9 +772,217 @@ export function GlbViewer() {
     };
   }, [layerContextMenu]);
 
+  useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      const drag = timelineResizeRef.current;
+      if (drag) {
+        const delta = drag.startY - event.clientY;
+        const next = THREE.MathUtils.clamp(Math.round(drag.startHeight + delta), 160, 560);
+        setTimelinePanelHeight(next);
+      }
+
+      const modifierDrag = timelineModifierDragRef.current;
+      if (!modifierDrag) return;
+      const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
+      if (!layer) return;
+      const deltaX = event.clientX - modifierDrag.startX;
+      const step = modifierDrag.propertyId.startsWith("rotation.") ? 1 : 0.01;
+      const nextRaw = modifierDrag.startValue + Math.round(deltaX / 8) * step;
+      const decimals = modifierDrag.propertyId.startsWith("rotation.") ? 2 : 3;
+      applyTimelinePropertyValue(layer, modifierDrag.propertyId, nextRaw.toFixed(decimals));
+    };
+    const onPointerUp = () => {
+      timelineResizeRef.current = null;
+      const modifierDrag = timelineModifierDragRef.current;
+      if (modifierDrag) {
+        const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
+        if (layer) {
+          commitTimelinePropertyEdit(layer, modifierDrag.propertyId);
+        }
+      }
+      timelineModifierDragRef.current = null;
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [layerItems]);
+
   const patchSettings = (patch: Partial<ViewerSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
     setHasUnsavedChanges(true);
+  };
+
+  const updateTimelineLengthVh = (rawValue: string) => {
+    const parsed = Number(rawValue);
+    if (Number.isNaN(parsed)) return;
+    const next = THREE.MathUtils.clamp(Math.round(parsed), 50, 5000);
+    setTimelineLengthVh(next);
+    setHasUnsavedChanges(true);
+  };
+
+  const adjustTimelineZoom = (direction: "in" | "out") => {
+    setTimelineZoom((prev) => {
+      const delta = direction === "in" ? 0.25 : -0.25;
+      return THREE.MathUtils.clamp(Number((prev + delta).toFixed(2)), 0.5, 4);
+    });
+  };
+
+  const getVisibleLayerItems = () => {
+    const byId = new Map(layerItems.map((layer) => [layer.id, layer]));
+    return layerItems.filter((layer) => {
+      if (deletedLayerIds.has(layer.id)) return false;
+      let currentParentId = layer.parentId;
+      while (currentParentId) {
+        if (collapsedGroupIds.has(currentParentId)) return false;
+        const parent = byId.get(currentParentId);
+        currentParentId = parent?.parentId ?? null;
+      }
+      return true;
+    });
+  };
+
+  const getTimelineRows = () => {
+    const visibleLayers = getVisibleLayerItems();
+    const rows: Array<
+      | { key: string; kind: "layer"; layer: LayerItem }
+      | { key: string; kind: "property"; layer: LayerItem; propertyId: string; label: string }
+    > = [];
+    visibleLayers.forEach((layer) => {
+      rows.push({ key: `layer-${layer.id}`, kind: "layer", layer });
+      if (timelineExpandedLayerIds.has(layer.id)) {
+        TIMELINE_PROPERTIES.forEach((property) => {
+          rows.push({
+            key: `prop-${layer.id}-${property.id}`,
+            kind: "property",
+            layer,
+            propertyId: property.id,
+            label: property.label,
+          });
+        });
+      }
+    });
+    return rows;
+  };
+
+  const getDepthShade = (depth: number) => {
+    const clamped = THREE.MathUtils.clamp(depth, 0, 8);
+    return Number((0.06 + clamped * 0.055).toFixed(3));
+  };
+
+  const getTimelinePropertyValue = (layer: LayerItem, propertyId: string) => {
+    switch (propertyId) {
+      case "position.x":
+        return layer.position.x;
+      case "position.y":
+        return layer.position.y;
+      case "position.z":
+        return layer.position.z;
+      case "rotation.x":
+        return layer.rotation.x;
+      case "rotation.y":
+        return layer.rotation.y;
+      case "rotation.z":
+        return layer.rotation.z;
+      case "scale.uniform":
+        return layer.scale.x;
+      case "opacity":
+        return layer.opacity;
+      default:
+        return 0;
+    }
+  };
+
+  const getTimelinePropertyStep = (propertyId: string) => {
+    if (propertyId.startsWith("rotation.")) return "1";
+    if (propertyId === "opacity") return "0.01";
+    return "0.01";
+  };
+
+  const applyTimelinePropertyValue = (layer: LayerItem, propertyId: string, rawValue: string) => {
+    switch (propertyId) {
+      case "position.x":
+        updateLayerCoordinate(layer.id, "x", rawValue);
+        return;
+      case "position.y":
+        updateLayerCoordinate(layer.id, "y", rawValue);
+        return;
+      case "position.z":
+        updateLayerCoordinate(layer.id, "z", rawValue);
+        return;
+      case "rotation.x":
+        updateLayerRotationCoordinate(layer.id, "x", rawValue);
+        return;
+      case "rotation.y":
+        updateLayerRotationCoordinate(layer.id, "y", rawValue);
+        return;
+      case "rotation.z":
+        updateLayerRotationCoordinate(layer.id, "z", rawValue);
+        return;
+      case "scale.uniform":
+        updateLayerUniformScale(layer.id, rawValue);
+        return;
+      case "opacity":
+        updateLayerOpacity(layer.id, rawValue);
+        return;
+      default:
+        return;
+    }
+  };
+
+  const beginTimelinePropertyEdit = (layer: LayerItem, propertyId: string) => {
+    if (propertyId.startsWith("position.")) beginLayerTransform(layer.id);
+    else if (propertyId.startsWith("rotation.")) beginLayerRotation(layer.id);
+    else if (propertyId === "scale.uniform") beginLayerScale(layer.id);
+  };
+
+  const commitTimelinePropertyEdit = (layer: LayerItem, propertyId: string) => {
+    if (propertyId.startsWith("position.")) commitLayerTransform(layer.id);
+    else if (propertyId.startsWith("rotation.")) commitLayerRotation(layer.id);
+    else if (propertyId === "scale.uniform") commitLayerScale(layer.id);
+    else if (propertyId === "opacity") commitLayerOpacity(layer.id);
+  };
+
+  const startTimelineModifierDrag = (
+    event: React.PointerEvent<HTMLSpanElement>,
+    layer: LayerItem,
+    propertyId: string
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    beginTimelinePropertyEdit(layer, propertyId);
+    timelineModifierDragRef.current = {
+      layerId: layer.id,
+      propertyId,
+      startX: event.clientX,
+      startValue: getTimelinePropertyValue(layer, propertyId),
+    };
+  };
+
+  const readCurrentCameraView = (): CameraView | null => {
+    const controls = orbitControlsRef.current;
+    const camera = cameraRef.current;
+    if (!controls || !camera) return null;
+    return {
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      target: [controls.target.x, controls.target.y, controls.target.z],
+      fov: camera.fov,
+      zoom: camera.zoom,
+    };
+  };
+
+  const applyCameraView = (view: CameraView) => {
+    const controls = orbitControlsRef.current;
+    const camera = cameraRef.current;
+    if (!controls || !camera) return;
+    camera.position.set(view.position[0], view.position[1], view.position[2]);
+    camera.fov = view.fov;
+    camera.zoom = view.zoom;
+    camera.updateProjectionMatrix();
+    controls.target.set(view.target[0], view.target[1], view.target[2]);
+    controls.update();
   };
 
   const selectLayer = (layerId: string) => {
@@ -744,6 +1029,9 @@ export function GlbViewer() {
           setLayerDetailsOpen({});
           setLayerSectionOpen({});
           setCollapsedGroupIds(new Set());
+          setTimelineExpandedLayerIds(new Set());
+          setViewMode("edit");
+          setCameraView(DEFAULT_CAMERA_VIEW);
           const emptyDeleted = new Set<string>();
           setDeletedLayerIds(emptyDeleted);
           deletedLayerIdsRef.current = emptyDeleted;
@@ -1027,6 +1315,26 @@ export function GlbViewer() {
     jumpToHistoryIndex(0);
   };
 
+  const enterAnimateMode = () => {
+    const view = readCurrentCameraView();
+    if (view) {
+      setCameraView(view);
+    }
+    setViewMode("animate");
+    const container = viewerRef.current;
+    if (container) {
+      container.scrollTo({ top: 0, behavior: "auto" });
+    }
+  };
+
+  const enterEditMode = () => {
+    setViewMode("edit");
+    const container = viewerRef.current;
+    if (container) {
+      container.scrollTo({ top: 0, behavior: "auto" });
+    }
+  };
+
   useEffect(() => {
     undoActionRef.current = undoLayerChange;
     redoActionRef.current = redoLayerChange;
@@ -1088,6 +1396,11 @@ export function GlbViewer() {
     deletedLayerIdsRef.current = nextDeleted;
     setDeletedLayerIds(nextDeleted);
     setCollapsedGroupIds((prev) => {
+      const next = new Set(prev);
+      idsToDelete.forEach((id) => next.delete(id));
+      return next;
+    });
+    setTimelineExpandedLayerIds((prev) => {
       const next = new Set(prev);
       idsToDelete.forEach((id) => next.delete(id));
       return next;
@@ -1729,6 +2042,7 @@ export function GlbViewer() {
 
   return (
     <div
+      ref={viewerRef}
       className="relative h-screen w-screen overflow-hidden"
       onDragOver={(event) => {
         event.preventDefault();
@@ -1741,9 +2055,10 @@ export function GlbViewer() {
         {hasModel ? (
           <Canvas>
             <PerspectiveCamera
+              ref={cameraRef}
               makeDefault
-              position={[2, 2, 2]}
-              fov={45}
+              position={cameraView.position}
+              fov={cameraView.fov}
               near={0.001}
               far={100000}
             />
@@ -1770,7 +2085,7 @@ export function GlbViewer() {
             )}
 
             <SceneGrid
-              show={settings.showGrid}
+              show={settings.showGrid && viewMode === "edit"}
               size={20}
               divisions={20}
               fadeDistance={30}
@@ -1788,9 +2103,11 @@ export function GlbViewer() {
               dampingFactor={0.1}
               minDistance={0.02}
               maxDistance={100000}
-              enablePan
-              enableZoom={settings.orbitEnableZoom}
-              autoRotate={settings.orbitAutoRotate}
+              enabled={viewMode === "edit"}
+              enableRotate={viewMode === "edit"}
+              enablePan={viewMode === "edit"}
+              enableZoom={viewMode === "edit" && settings.orbitEnableZoom}
+              autoRotate={viewMode === "edit" && settings.orbitAutoRotate}
             />
           </Canvas>
         ) : (
@@ -1841,64 +2158,85 @@ export function GlbViewer() {
           </div>
           {layerMessage ? <p className="text-xs text-muted-foreground">{layerMessage}</p> : null}
 
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full justify-between"
-                onClick={() => setUploadOpen((prev) => !prev)}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <PanelLeft className="h-4 w-4" />
-                  Upload
-                </span>
-                {uploadOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {uploadOpen ? <CardContent className="pt-0">{uploadPanel}</CardContent> : null}
-          </Card>
+          {viewMode === "edit" ? (
+            <>
+              <Card className="bg-card/95 backdrop-blur">
+                <CardHeader className="py-3">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full justify-between"
+                    onClick={() => setUploadOpen((prev) => !prev)}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <PanelLeft className="h-4 w-4" />
+                      Upload
+                    </span>
+                    {uploadOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  </Button>
+                </CardHeader>
+                {uploadOpen ? <CardContent className="pt-0">{uploadPanel}</CardContent> : null}
+              </Card>
 
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full justify-between"
-                onClick={() => setHistoryOpen((prev) => !prev)}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <History className="h-4 w-4" />
-                  History
-                </span>
-                {historyOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {historyOpen ? <CardContent className="pt-0">{historyPanel}</CardContent> : null}
-          </Card>
+              <Card className="bg-card/95 backdrop-blur">
+                <CardHeader className="py-3">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full justify-between"
+                    onClick={() => setHistoryOpen((prev) => !prev)}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <History className="h-4 w-4" />
+                      History
+                    </span>
+                    {historyOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  </Button>
+                </CardHeader>
+                {historyOpen ? <CardContent className="pt-0">{historyPanel}</CardContent> : null}
+              </Card>
 
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full justify-between"
-                onClick={() => setLayersOpen((prev) => !prev)}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Layers3 className="h-4 w-4" />
-                  Layers
-                </span>
-                {layersOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {layersOpen ? <CardContent className="pt-0">{layersPanel}</CardContent> : null}
-          </Card>
+              <Card className="bg-card/95 backdrop-blur">
+                <CardHeader className="py-3">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full justify-between"
+                    onClick={() => setLayersOpen((prev) => !prev)}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Layers3 className="h-4 w-4" />
+                      Layers
+                    </span>
+                    {layersOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  </Button>
+                </CardHeader>
+                {layersOpen ? <CardContent className="pt-0">{layersPanel}</CardContent> : null}
+              </Card>
+            </>
+          ) : null}
         </aside>
       ) : null}
 
       {hasModel ? (
-        <aside className="absolute right-4 top-4 z-40 w-full max-w-md">
+        <aside className="absolute right-4 top-4 z-40 w-full max-w-md space-y-2">
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              size="sm"
+              variant={viewMode === "edit" ? "default" : "secondary"}
+              onClick={enterEditMode}
+            >
+              Orbit
+            </Button>
+            <Button
+              size="sm"
+              variant={viewMode === "animate" ? "default" : "secondary"}
+              onClick={enterAnimateMode}
+            >
+              Animate
+            </Button>
+          </div>
+
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
               <Button
@@ -2170,6 +2508,243 @@ export function GlbViewer() {
             </Card>
               </CardContent>
             ) : null}
+          </Card>
+        </aside>
+      ) : null}
+
+      {hasModel && viewMode === "animate" ? (
+        <aside className="pointer-events-none absolute bottom-0 left-0 right-0 z-40">
+          <div
+            className="pointer-events-auto mb-1 h-2 cursor-ns-resize rounded-sm bg-border/80"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              timelineResizeRef.current = {
+                startY: event.clientY,
+                startHeight: timelinePanelHeight,
+              };
+            }}
+            title="Drag to resize timeline height"
+          />
+          <Card className="pointer-events-auto border bg-card/95 backdrop-blur">
+            <CardContent className="space-y-3 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs font-medium">Timeline</div>
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="timeline-length" className="text-xs text-muted-foreground">
+                    Length (vh)
+                  </Label>
+                  <Input
+                    id="timeline-length"
+                    type="number"
+                    min={50}
+                    max={5000}
+                    step={10}
+                    value={timelineLengthVh}
+                    onChange={(event) => updateTimelineLengthVh(event.target.value)}
+                    className="h-8 w-24 text-xs"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-8 p-0"
+                    onClick={() => adjustTimelineZoom("out")}
+                  >
+                    -
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-8 p-0"
+                    onClick={() => adjustTimelineZoom("in")}
+                  >
+                    +
+                  </Button>
+                </div>
+              </div>
+
+              <div className="rounded-md border bg-background/70">
+                {(() => {
+                  const timelineRows = getTimelineRows();
+                  const trackWidth = Math.max(1200, timelineLengthVh * 3 * timelineZoom);
+                  const markerStep =
+                    timelineLengthVh <= 200 ? 25 : timelineLengthVh <= 500 ? 50 : 100;
+                  const markerCount = Math.floor(timelineLengthVh / markerStep);
+                  return (
+                    <div className="overflow-auto" style={{ maxHeight: `${timelinePanelHeight}px` }}>
+                      <div style={{ width: `${320 + trackWidth}px` }}>
+                        <div className="grid grid-cols-[320px_1fr] border-b">
+                          <div className="sticky left-0 z-20 border-r bg-card px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                            Layers
+                          </div>
+                          <div className="relative h-7">
+                            {Array.from({ length: markerCount + 1 }).map((_, index) => {
+                              const valueVh = index * markerStep;
+                              const left = (valueVh / timelineLengthVh) * 100;
+                              return (
+                                <div
+                                  key={`marker-${valueVh}`}
+                                  className="absolute bottom-0 top-0"
+                                  style={{ left: `${left}%` }}
+                                >
+                                  <span className="absolute top-0 -translate-x-1/2 text-[10px] text-muted-foreground">
+                                    {valueVh}vh
+                                  </span>
+                                  <span className="absolute bottom-0 top-3 w-px bg-border/70" />
+                                </div>
+                              );
+                            })}
+                            <span
+                              className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-primary"
+                              style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {timelineRows.map((row) => (
+                          <div key={row.key} className="grid grid-cols-[320px_1fr] border-b last:border-b-0">
+                            {row.kind === "layer" ? (
+                              <div
+                                className={cn(
+                                  "sticky left-0 z-20 flex h-8 items-center gap-1 border-r bg-card px-2 text-xs",
+                                  selectedLayerId === row.layer.id ? "bg-primary/10" : ""
+                                )}
+                                style={
+                                  selectedLayerId === row.layer.id
+                                    ? undefined
+                                    : { backgroundColor: `rgba(100, 116, 139, ${getDepthShade(row.layer.depth)})` }
+                                }
+                              >
+                                {row.layer.hasChildren ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 w-6 p-0"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setCollapsedGroupIds((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(row.layer.id)) next.delete(row.layer.id);
+                                        else next.add(row.layer.id);
+                                        return next;
+                                      });
+                                    }}
+                                  >
+                                    <span className="text-xs font-semibold leading-none">
+                                      {collapsedGroupIds.has(row.layer.id) ? "+" : "-"}
+                                    </span>
+                                  </Button>
+                                ) : (
+                                  <span className="inline-block h-6 w-6" />
+                                )}
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 w-6 p-0"
+                                  onClick={() =>
+                                    setTimelineExpandedLayerIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(row.layer.id)) next.delete(row.layer.id);
+                                      else next.add(row.layer.id);
+                                      return next;
+                                    })
+                                  }
+                                >
+                                  {timelineExpandedLayerIds.has(row.layer.id) ? (
+                                    <ChevronDown className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <ChevronRight className="h-3.5 w-3.5" />
+                                  )}
+                                </Button>
+                                <button
+                                  type="button"
+                                  className="min-w-0 flex-1 truncate text-left"
+                                  onClick={() => selectLayer(row.layer.id)}
+                                  title={row.layer.name}
+                                >
+                                  <span
+                                    className={cn(
+                                      "block truncate",
+                                      row.layer.depth > 0 ? "border-l-2 border-slate-500/70 pl-2" : ""
+                                    )}
+                                    style={{ marginLeft: `${Math.min(row.layer.depth, 6) * 10}px` }}
+                                  >
+                                    {row.layer.name}
+                                  </span>
+                                </button>
+                                <Switch
+                                  checked={row.layer.visible}
+                                  onCheckedChange={(checked) => setLayerVisibility(row.layer.id, checked)}
+                                />
+                              </div>
+                            ) : (
+                              <div
+                                className="sticky left-0 z-20 flex h-7 items-center gap-1 border-r bg-card px-2 text-[11px] text-muted-foreground"
+                                style={{
+                                  backgroundColor: `rgba(241, 245, 249, ${Math.max(0.18, getDepthShade(row.layer.depth) * 0.28)})`,
+                                }}
+                              >
+                                <span className="inline-block w-8" />
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center gap-1",
+                                    row.layer.depth > 0 ? "border-l-2 border-slate-500/70 pl-2" : "",
+                                    "cursor-ew-resize select-none"
+                                  )}
+                                  style={{ marginLeft: `${Math.min(row.layer.depth + 1, 7) * 10}px` }}
+                                  title="Drag left/right to change value"
+                                  onPointerDown={(event) =>
+                                    startTimelineModifierDrag(event, row.layer, row.propertyId)
+                                  }
+                                >
+                                  <Diamond className="h-3 w-3 rotate-45" />
+                                  {row.label}
+                                </span>
+                                <Input
+                                  type="number"
+                                  step={getTimelinePropertyStep(row.propertyId)}
+                                  value={getTimelinePropertyValue(row.layer, row.propertyId)}
+                                  onFocus={() => beginTimelinePropertyEdit(row.layer, row.propertyId)}
+                                  onBlur={() => commitTimelinePropertyEdit(row.layer, row.propertyId)}
+                                  onChange={(event) =>
+                                    applyTimelinePropertyValue(row.layer, row.propertyId, event.target.value)
+                                  }
+                                  className="ml-auto h-6 w-24 text-[11px]"
+                                />
+                              </div>
+                            )}
+
+                            <div
+                              className={cn(
+                                "relative",
+                                row.kind === "layer"
+                                  ? "h-8 bg-[linear-gradient(to_right,transparent_0,transparent_calc(25%-1px),rgba(148,163,184,0.2)_25%,transparent_calc(25%+1px),transparent_calc(50%-1px),rgba(148,163,184,0.2)_50%,transparent_calc(50%+1px),transparent_calc(75%-1px),rgba(148,163,184,0.2)_75%,transparent_calc(75%+1px),transparent_100%)]"
+                                  : "h-7 bg-[linear-gradient(to_right,transparent_0,transparent_calc(25%-1px),rgba(148,163,184,0.16)_25%,transparent_calc(25%+1px),transparent_calc(50%-1px),rgba(148,163,184,0.16)_50%,transparent_calc(50%+1px),transparent_calc(75%-1px),rgba(148,163,184,0.16)_75%,transparent_calc(75%+1px),transparent_100%)]"
+                              )}
+                              style={{
+                                backgroundColor:
+                                  row.kind === "layer"
+                                    ? `rgba(100, 116, 139, ${getDepthShade(row.layer.depth) * 0.85})`
+                                    : `rgba(241, 245, 249, ${Math.max(0.12, getDepthShade(row.layer.depth) * 0.22)})`,
+                              }}
+                            >
+                              {row.kind === "property" ? (
+                                <span className="absolute right-2 top-1/2 h-2 w-2 -translate-y-1/2 rotate-45 border border-muted-foreground/70 bg-background/90" />
+                              ) : null}
+                              <span
+                                className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-primary"
+                                style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </CardContent>
           </Card>
         </aside>
       ) : null}
