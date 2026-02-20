@@ -16,6 +16,7 @@ import {
   Code2,
   Download,
   Globe2,
+  History,
   Lightbulb,
   Layers3,
   PanelLeft,
@@ -80,17 +81,29 @@ type LayerItem = {
   type: string;
   depth: number;
   visible: boolean;
+  opacity: number;
   position: { x: number; y: number; z: number };
+  scale: { x: number; y: number; z: number };
   worldPosition: { x: number; y: number; z: number };
 };
 
 type LayerSnapshot = Record<
   string,
   {
+    name: string;
     visible: boolean;
+    deleted: boolean;
+    opacity: number;
     position: { x: number; y: number; z: number };
+    scale: { x: number; y: number; z: number };
   }
 >;
+
+type HistoryEntry = {
+  id: string;
+  label: string;
+  snapshot: LayerSnapshot;
+};
 
 const MAX_POINT_LIGHTS = 4;
 const CONFIG_STORAGE_KEY = "glb_tool_viewer_config_v1";
@@ -207,6 +220,7 @@ function SliderField({
   max,
   step,
   onChange,
+  onCommit,
 }: {
   label: string;
   value: number;
@@ -214,6 +228,7 @@ function SliderField({
   max: number;
   step: number;
   onChange: (value: number) => void;
+  onCommit?: (value: number) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -229,6 +244,7 @@ function SliderField({
         step={step}
         value={[value]}
         onValueChange={(arr) => onChange(arr[0] ?? value)}
+        onValueCommit={(arr) => onCommit?.(arr[0] ?? value)}
       />
     </div>
   );
@@ -281,11 +297,13 @@ function ScrubbableNumberField({
   value,
   onBeginChange,
   onValueChange,
+  onEndChange,
 }: {
   label: string;
   value: number;
   onBeginChange?: () => void;
   onValueChange: (value: number) => void;
+  onEndChange?: () => void;
 }) {
   const dragRef = useRef<{ startX: number; startValue: number; active: boolean } | null>(null);
   const typingRef = useRef(false);
@@ -310,6 +328,7 @@ function ScrubbableNumberField({
     const handleUp = () => {
       if (dragRef.current) dragRef.current.active = false;
       dragRef.current = null;
+      onEndChange?.();
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
     };
@@ -341,6 +360,9 @@ function ScrubbableNumberField({
           onValueChange(parsed);
         }}
         onBlur={() => {
+          if (typingRef.current) {
+            onEndChange?.();
+          }
           typingRef.current = false;
         }}
       />
@@ -387,6 +409,74 @@ function getObjectPositionInfo(object: THREE.Object3D) {
   };
 }
 
+function getObjectScaleInfo(object: THREE.Object3D) {
+  return {
+    scale: {
+      x: Number(object.scale.x.toFixed(3)),
+      y: Number(object.scale.y.toFixed(3)),
+      z: Number(object.scale.z.toFixed(3)),
+    },
+  };
+}
+
+function getObjectOpacity(object: THREE.Object3D) {
+  let opacity = 1;
+  let found = false;
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.material || found) return;
+    const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    if (!material) return;
+    opacity = Number((material.opacity ?? 1).toFixed(3));
+    found = true;
+  });
+  return opacity;
+}
+
+function setObjectOpacity(object: THREE.Object3D, value: number) {
+  const opacity = THREE.MathUtils.clamp(value, 0, 1);
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.material) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach((material) => {
+      material.opacity = opacity;
+      material.transparent = opacity < 1;
+      material.needsUpdate = true;
+    });
+  });
+}
+
+function setObjectUniformScaleFromCenter(object: THREE.Object3D, rawValue: number) {
+  const uniformScale = THREE.MathUtils.clamp(rawValue, 0.001, 100);
+  const beforeBox = new THREE.Box3().setFromObject(object);
+  const beforeCenter = new THREE.Vector3();
+  const hasBeforeCenter = !beforeBox.isEmpty();
+  if (hasBeforeCenter) beforeBox.getCenter(beforeCenter);
+
+  object.scale.set(uniformScale, uniformScale, uniformScale);
+  object.updateMatrixWorld(true);
+
+  if (!hasBeforeCenter) return;
+  const afterBox = new THREE.Box3().setFromObject(object);
+  if (afterBox.isEmpty()) return;
+  const afterCenter = new THREE.Vector3();
+  afterBox.getCenter(afterCenter);
+  const worldDelta = beforeCenter.sub(afterCenter);
+  if (worldDelta.lengthSq() < 1e-12) return;
+
+  const originWorld = new THREE.Vector3();
+  object.getWorldPosition(originWorld);
+  const targetOriginWorld = originWorld.add(worldDelta);
+  if (object.parent) {
+    const targetLocal = object.parent.worldToLocal(targetOriginWorld.clone());
+    object.position.copy(targetLocal);
+  } else {
+    object.position.copy(targetOriginWorld);
+  }
+  object.updateMatrixWorld(true);
+}
+
 function isTransformableLayer(object: THREE.Object3D): boolean {
   if (object.type === "Bone") return false;
   if (object.type === "SkeletonHelper") return false;
@@ -424,7 +514,9 @@ function getLayerItems(scene: THREE.Object3D): {
       type: object.type,
       depth,
       visible: object.visible,
+      opacity: getObjectOpacity(object),
       ...getObjectPositionInfo(object),
+      ...getObjectScaleInfo(object),
     };
     items.push(item);
     objectMap.set(item.id, object);
@@ -443,31 +535,75 @@ export function GlbViewer() {
   const [isLoading, setIsLoading] = useState(false);
   const [showCustomize, setShowCustomize] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [layersOpen, setLayersOpen] = useState(true);
   const [settings, setSettings] = useState<ViewerSettings>(DEFAULT_SETTINGS);
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
   const [layerItems, setLayerItems] = useState<LayerItem[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [layerDetailsOpen, setLayerDetailsOpen] = useState<Record<string, boolean>>({});
+  const [layerSectionOpen, setLayerSectionOpen] = useState<Record<string, boolean>>({});
+  const [deletedLayerIds, setDeletedLayerIds] = useState<Set<string>>(new Set());
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [configText, setConfigText] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
-  const [undoCount, setUndoCount] = useState(0);
-  const [redoCount, setRedoCount] = useState(0);
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(0);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const loadIdRef = useRef(0);
   const layerObjectMapRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  const deletedLayerIdsRef = useRef<Set<string>>(new Set());
   const orbitControlsRef = useRef<OrbitControlsImpl | null>(null);
-  const undoStackRef = useRef<LayerSnapshot[]>([]);
-  const redoStackRef = useRef<LayerSnapshot[]>([]);
+  const historyEntriesRef = useRef<HistoryEntry[]>([]);
+  const historyIndexRef = useRef(0);
+  const pendingTransformLayerIdsRef = useRef<Set<string>>(new Set());
+  const pendingScaleLayerIdsRef = useRef<Set<string>>(new Set());
 
   const hasModel = modelScene !== null;
+  const undoCount = historyIndex;
+  const redoCount = Math.max(0, historyEntries.length - 1 - historyIndex);
 
   useEffect(() => {
     if (configDirty) return;
     const text = JSON.stringify({ settings, pointLights }, null, 2);
     setConfigText(text);
   }, [settings, pointLights, configDirty]);
+
+  useEffect(() => {
+    deletedLayerIdsRef.current = deletedLayerIds;
+  }, [deletedLayerIds]);
+
+  const commitHistoryState = (entries: HistoryEntry[], index: number) => {
+    historyEntriesRef.current = entries;
+    historyIndexRef.current = index;
+    setHistoryEntries(entries);
+    setHistoryIndex(index);
+  };
+
+  const getLayerName = (layerId: string) => {
+    const fromList = layerItems.find((layer) => layer.id === layerId)?.name;
+    if (fromList) return fromList;
+    const object = layerObjectMapRef.current.get(layerId);
+    return object?.name?.trim() || "Layer";
+  };
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [hasUnsavedChanges]);
+
+  const patchSettings = (patch: Partial<ViewerSettings>) => {
+    setSettings((prev) => ({ ...prev, ...patch }));
+    setHasUnsavedChanges(true);
+  };
 
   const selectLayer = (layerId: string) => {
     if (!layerObjectMapRef.current.get(layerId)) {
@@ -508,11 +644,45 @@ export function GlbViewer() {
           setLayerItems(items);
           layerObjectMapRef.current = objectMap;
           setSelectedLayerId(null);
+          setRenamingLayerId(null);
+          setRenameValue("");
           setLayerDetailsOpen({});
-          undoStackRef.current = [];
-          redoStackRef.current = [];
-          setUndoCount(0);
-          setRedoCount(0);
+          setLayerSectionOpen({});
+          const emptyDeleted = new Set<string>();
+          setDeletedLayerIds(emptyDeleted);
+          deletedLayerIdsRef.current = emptyDeleted;
+          setHasUnsavedChanges(false);
+          const initialSnapshot: LayerSnapshot = {};
+          objectMap.forEach((object, id) => {
+            initialSnapshot[id] = {
+              name: object.name,
+              visible: object.visible,
+              deleted: false,
+              opacity: getObjectOpacity(object),
+              position: {
+                x: object.position.x,
+                y: object.position.y,
+                z: object.position.z,
+              },
+              scale: {
+                x: object.scale.x,
+                y: object.scale.y,
+                z: object.scale.z,
+              },
+            };
+          });
+          commitHistoryState(
+            [
+              {
+                id: `${Date.now()}-init`,
+                label: "Initial state",
+                snapshot: initialSnapshot,
+              },
+            ],
+            0
+          );
+          pendingTransformLayerIdsRef.current.clear();
+          pendingScaleLayerIdsRef.current.clear();
           if (previousScene) disposeScene(previousScene);
           setUploadOpen(false);
           setLayersOpen(true);
@@ -553,10 +723,12 @@ export function GlbViewer() {
   };
 
   const updatePointLight = (id: string, patch: Partial<PointLightConfig>) => {
+    setHasUnsavedChanges(true);
     setPointLights((prev) => prev.map((l) => (l.id === id ? sanitizePointLight({ ...l, ...patch }, 0) : l)));
   };
 
   const addPointLight = () => {
+    setHasUnsavedChanges(true);
     setPointLights((prev) => {
       if (prev.length >= MAX_POINT_LIGHTS) return prev;
       return [...prev, createDefaultPointLight(prev.length)];
@@ -564,6 +736,7 @@ export function GlbViewer() {
   };
 
   const removePointLight = (id: string) => {
+    setHasUnsavedChanges(true);
     setPointLights((prev) => {
       if (prev.length === 1) return prev;
       return prev.filter((l) => l.id !== id);
@@ -584,6 +757,7 @@ export function GlbViewer() {
       setSettings(mergedSettings);
       setPointLights(mergedLights.length > 0 ? mergedLights : [createDefaultPointLight(0)]);
       setConfigDirty(false);
+      setHasUnsavedChanges(true);
       setConfigMessage("Config applied.");
     } catch (error) {
       setConfigMessage(`Invalid config: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -612,6 +786,7 @@ export function GlbViewer() {
     }
     setConfigText(saved);
     setConfigDirty(true);
+    setHasUnsavedChanges(true);
     setConfigMessage("Saved config loaded into editor. Click Apply.");
   };
 
@@ -637,11 +812,19 @@ export function GlbViewer() {
     const snapshot: LayerSnapshot = {};
     layerObjectMapRef.current.forEach((object, id) => {
       snapshot[id] = {
+        name: object.name,
         visible: object.visible,
+        deleted: deletedLayerIdsRef.current.has(id),
+        opacity: getObjectOpacity(object),
         position: {
           x: object.position.x,
           y: object.position.y,
           z: object.position.z,
+        },
+        scale: {
+          x: object.scale.x,
+          y: object.scale.y,
+          z: object.scale.z,
         },
       };
     });
@@ -655,133 +838,229 @@ export function GlbViewer() {
         if (!object) return layer;
         return {
           ...layer,
+          name: object.name.trim() || layer.name,
           visible: object.visible,
+          opacity: getObjectOpacity(object),
           ...getObjectPositionInfo(object),
+          ...getObjectScaleInfo(object),
         };
       })
     );
   };
 
-  const pushHistory = () => {
-    undoStackRef.current = [...undoStackRef.current.slice(-9), captureLayerSnapshot()];
-    redoStackRef.current = [];
-    setUndoCount(undoStackRef.current.length);
-    setRedoCount(redoStackRef.current.length);
+  const pushHistory = (label: string) => {
+    const snapshot = captureLayerSnapshot();
+    const base = historyEntriesRef.current.slice(0, historyIndexRef.current + 1);
+    let next = [
+      ...base,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        label,
+        snapshot,
+      },
+    ];
+    const maxEntries = 40;
+    if (next.length > maxEntries) {
+      next = next.slice(next.length - maxEntries);
+    }
+    commitHistoryState(next, next.length - 1);
+    setHasUnsavedChanges(true);
   };
 
   const applyLayerSnapshot = (snapshot: LayerSnapshot) => {
+    const deleted = new Set<string>();
     Object.entries(snapshot).forEach(([id, value]) => {
       const object = layerObjectMapRef.current.get(id);
       if (!object) return;
+      object.name = value.name || object.name;
       object.visible = value.visible;
+      setObjectOpacity(object, value.opacity ?? 1);
       object.position.set(value.position.x, value.position.y, value.position.z);
+      object.scale.set(value.scale?.x ?? 1, value.scale?.y ?? 1, value.scale?.z ?? 1);
       object.updateMatrixWorld();
+      if (value.deleted) {
+        deleted.add(id);
+      }
     });
+    deletedLayerIdsRef.current = deleted;
+    setDeletedLayerIds(deleted);
+    if (selectedLayerId && deleted.has(selectedLayerId)) {
+      setSelectedLayerId(null);
+    }
     refreshLayerItemsFromScene();
+    setHasUnsavedChanges(true);
+  };
+
+  const jumpToHistoryIndex = (index: number) => {
+    const entry = historyEntriesRef.current[index];
+    if (!entry) return;
+    historyIndexRef.current = index;
+    setHistoryIndex(index);
+    applyLayerSnapshot(entry.snapshot);
   };
 
   const undoLayerChange = () => {
-    const previous = undoStackRef.current.at(-1);
-    if (!previous) return;
-    const current = captureLayerSnapshot();
-    undoStackRef.current = undoStackRef.current.slice(0, -1);
-    redoStackRef.current = [...redoStackRef.current.slice(-9), current];
-    applyLayerSnapshot(previous);
-    setUndoCount(undoStackRef.current.length);
-    setRedoCount(redoStackRef.current.length);
+    if (historyIndexRef.current <= 0) return;
+    jumpToHistoryIndex(historyIndexRef.current - 1);
   };
 
   const redoLayerChange = () => {
-    const next = redoStackRef.current.at(-1);
-    if (!next) return;
-    const current = captureLayerSnapshot();
-    redoStackRef.current = redoStackRef.current.slice(0, -1);
-    undoStackRef.current = [...undoStackRef.current.slice(-9), current];
-    applyLayerSnapshot(next);
-    setUndoCount(undoStackRef.current.length);
-    setRedoCount(redoStackRef.current.length);
+    if (historyIndexRef.current >= historyEntriesRef.current.length - 1) return;
+    jumpToHistoryIndex(historyIndexRef.current + 1);
   };
 
   const resetLayerChanges = () => {
-    const baseline = undoStackRef.current[0];
-    if (!baseline) return;
-    pushHistory();
-    applyLayerSnapshot(baseline);
+    jumpToHistoryIndex(0);
   };
 
   const deleteLayer = (layerId: string) => {
     const object = layerObjectMapRef.current.get(layerId);
-    if (!object || !object.parent) return;
+    if (!object) return;
+    const layerName = getLayerName(layerId);
 
     const idsToDelete: string[] = [];
     object.traverse((child) => {
       idsToDelete.push(child.uuid);
+      child.visible = false;
+      child.updateMatrixWorld();
     });
-    object.parent.remove(object);
-
-    idsToDelete.forEach((id) => {
-      layerObjectMapRef.current.delete(id);
-    });
-
-    setLayerItems((prev) => prev.filter((layer) => !idsToDelete.includes(layer.id)));
-    setLayerDetailsOpen((prev) => {
-      const next = { ...prev };
-      idsToDelete.forEach((id) => {
-        delete next[id];
-      });
-      return next;
-    });
+    const nextDeleted = new Set(deletedLayerIdsRef.current);
+    idsToDelete.forEach((id) => nextDeleted.add(id));
+    deletedLayerIdsRef.current = nextDeleted;
+    setDeletedLayerIds(nextDeleted);
 
     if (selectedLayerId && idsToDelete.includes(selectedLayerId)) {
       setSelectedLayerId(null);
     }
-
-    // Structural change invalidates prior snapshots.
-    undoStackRef.current = [];
-    redoStackRef.current = [];
-    setUndoCount(0);
-    setRedoCount(0);
+    if (renamingLayerId && idsToDelete.includes(renamingLayerId)) {
+      setRenamingLayerId(null);
+      setRenameValue("");
+    }
+    refreshLayerItemsFromScene();
+    pushHistory(`Delete: ${layerName}`);
     setLayerMessage("Layer deleted.");
   };
 
   const setLayerVisibility = (layerId: string, visible: boolean) => {
-    pushHistory();
+    const layerName = getLayerName(layerId);
     const object = layerObjectMapRef.current.get(layerId);
     if (!object) return;
     object.visible = visible;
+    const opacity = getObjectOpacity(object);
     if (!visible && selectedLayerId === layerId) {
       setSelectedLayerId(null);
     }
     setLayerItems((prev) =>
-      prev.map((layer) => (layer.id === layerId ? { ...layer, visible } : layer))
+      prev.map((layer) =>
+        layer.id === layerId ? { ...layer, visible, opacity: Number(opacity.toFixed(3)) } : layer
+      )
     );
+    pushHistory(`Visibility: ${layerName} ${visible ? "On" : "Off"}`);
   };
 
-  const syncLayerPosition = (layerId: string) => {
+  const syncLayerTransform = (layerId: string) => {
     const object = layerObjectMapRef.current.get(layerId);
     if (!object) return;
-    const info = getObjectPositionInfo(object);
+    const info = {
+      ...getObjectPositionInfo(object),
+      ...getObjectScaleInfo(object),
+    };
     setLayerItems((prev) =>
       prev.map((layer) => (layer.id === layerId ? { ...layer, ...info } : layer))
     );
   };
 
-  const updateLayerCoordinate = (
-    layerId: string,
-    axis: "x" | "y" | "z",
-    rawValue: string,
-    options?: { recordHistory?: boolean }
-  ) => {
+  const updateLayerCoordinate = (layerId: string, axis: "x" | "y" | "z", rawValue: string) => {
     const object = layerObjectMapRef.current.get(layerId);
     if (!object) return;
     const value = Number(rawValue);
     if (Number.isNaN(value)) return;
-    if (options?.recordHistory !== false) {
-      pushHistory();
-    }
     object.position[axis] = value;
     object.updateMatrixWorld();
-    syncLayerPosition(layerId);
+    syncLayerTransform(layerId);
+    setHasUnsavedChanges(true);
+  };
+
+  const updateLayerUniformScale = (layerId: string, rawValue: string) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object) return;
+    const value = Number(rawValue);
+    if (Number.isNaN(value)) return;
+    setObjectUniformScaleFromCenter(object, value);
+    syncLayerTransform(layerId);
+    setHasUnsavedChanges(true);
+  };
+
+  const updateLayerOpacity = (layerId: string, rawValue: string) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object) return;
+    const value = Number(rawValue);
+    if (Number.isNaN(value)) return;
+    const opacity = THREE.MathUtils.clamp(value, 0, 1);
+    setObjectOpacity(object, opacity);
+    object.updateMatrixWorld();
+    setLayerItems((prev) =>
+      prev.map((layer) =>
+        layer.id === layerId ? { ...layer, opacity: Number(opacity.toFixed(3)) } : layer
+      )
+    );
+  };
+
+  const commitLayerOpacity = (layerId: string) => {
+    pushHistory(`Opacity: ${getLayerName(layerId)}`);
+  };
+
+  const beginLayerTransform = (layerId: string) => {
+    pendingTransformLayerIdsRef.current.add(layerId);
+  };
+
+  const commitLayerTransform = (layerId: string) => {
+    if (!pendingTransformLayerIdsRef.current.has(layerId)) return;
+    pendingTransformLayerIdsRef.current.delete(layerId);
+    pushHistory(`Move: ${getLayerName(layerId)}`);
+  };
+
+  const beginLayerScale = (layerId: string) => {
+    pendingScaleLayerIdsRef.current.add(layerId);
+  };
+
+  const commitLayerScale = (layerId: string) => {
+    if (!pendingScaleLayerIdsRef.current.has(layerId)) return;
+    pendingScaleLayerIdsRef.current.delete(layerId);
+    pushHistory(`Scale: ${getLayerName(layerId)}`);
+  };
+
+  const startRenameLayer = (layerId: string) => {
+    const layer = layerItems.find((item) => item.id === layerId);
+    if (!layer) return;
+    setRenamingLayerId(layerId);
+    setRenameValue(layer.name);
+  };
+
+  const cancelRenameLayer = () => {
+    setRenamingLayerId(null);
+    setRenameValue("");
+  };
+
+  const commitRenameLayer = (layerId: string) => {
+    const nextName = renameValue.trim();
+    if (!nextName) {
+      cancelRenameLayer();
+      return;
+    }
+    const currentName = getLayerName(layerId);
+    if (nextName === currentName) {
+      cancelRenameLayer();
+      return;
+    }
+    setLayerItems((prev) =>
+      prev.map((layer) => (layer.id === layerId ? { ...layer, name: nextName } : layer))
+    );
+    const object = layerObjectMapRef.current.get(layerId);
+    if (object) object.name = nextName;
+    cancelRenameLayer();
+    pushHistory(`Rename: ${nextName}`);
+    setLayerMessage("Layer renamed.");
   };
 
   const exportCurrentModel = () => {
@@ -812,12 +1091,13 @@ export function GlbViewer() {
         link.click();
         link.remove();
         URL.revokeObjectURL(url);
+        setHasUnsavedChanges(false);
         setLayerMessage("Model exported.");
       },
       () => {
         setLayerMessage("Failed to export model.");
       },
-      { binary: true, onlyVisible: false, includeCustomExtensions: true }
+      { binary: true, onlyVisible: true, includeCustomExtensions: true }
     );
   };
 
@@ -842,13 +1122,45 @@ export function GlbViewer() {
     </div>
   );
 
+  const historyPanel = (
+    <div className="space-y-2">
+      {historyEntries.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No history yet.</p>
+      ) : (
+        <div className="max-h-[28vh] space-y-1 overflow-y-auto pr-1">
+          {historyEntries.map((entry, index) => {
+            const isCurrent = index === historyIndex;
+            const isFuture = index > historyIndex;
+            return (
+              <button
+                key={entry.id}
+                type="button"
+                onClick={() => jumpToHistoryIndex(index)}
+                className={cn(
+                  "flex w-full items-center justify-between rounded-md border px-2 py-1.5 text-left text-xs transition",
+                  isCurrent ? "border-primary bg-primary/10" : "border-border bg-background/60",
+                  isFuture ? "opacity-45" : ""
+                )}
+              >
+                <span className="truncate">{entry.label}</span>
+                <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">#{index}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
   const layersPanel = (
     <div className="space-y-3">
-      {layerItems.length === 0 ? (
+      {layerItems.filter((layer) => !deletedLayerIds.has(layer.id)).length === 0 ? (
         <p className="text-xs text-muted-foreground">No layers found for this model.</p>
       ) : (
         <div className="max-h-[60vh] space-y-1 overflow-y-auto pr-1">
-            {layerItems.map((layer) => (
+            {layerItems
+              .filter((layer) => !deletedLayerIds.has(layer.id))
+              .map((layer) => (
               <div key={layer.id} className="space-y-1">
                 <div
                   className={cn(
@@ -859,13 +1171,40 @@ export function GlbViewer() {
                 >
                   <button
                     type="button"
-                    className="min-w-0 text-left"
+                    className="flex min-w-0 flex-1 flex-col pr-2 text-left"
                     onClick={() => {
                       selectLayer(layer.id);
                     }}
+                    onDoubleClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      startRenameLayer(layer.id);
+                    }}
                   >
-                    <p className="truncate text-xs font-medium">{layer.name}</p>
-                    <p className="text-[11px] text-muted-foreground">{layer.type}</p>
+                    {renamingLayerId === layer.id ? (
+                      <Input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(event) => setRenameValue(event.target.value)}
+                        onBlur={() => commitRenameLayer(layer.id)}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            commitRenameLayer(layer.id);
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelRenameLayer();
+                          }
+                        }}
+                        className="h-7 w-full text-xs"
+                      />
+                    ) : (
+                      <p className="truncate text-xs font-medium">{layer.name}</p>
+                    )}
+                    {renamingLayerId === layer.id ? null : (
+                      <p className="truncate text-[11px] text-muted-foreground">{layer.type}</p>
+                    )}
                   </button>
                   <div className="flex items-center gap-1">
                     <Button
@@ -874,10 +1213,22 @@ export function GlbViewer() {
                       variant="outline"
                       onClick={(event) => {
                         event.stopPropagation();
+                        const nextOpen = !layerDetailsOpen[layer.id];
                         setLayerDetailsOpen((prev) => ({
                           ...prev,
-                          [layer.id]: !prev[layer.id],
+                          [layer.id]: nextOpen,
                         }));
+                        if (nextOpen) {
+                          setLayerSectionOpen((prev) => ({
+                            ...prev,
+                            [`${layer.id}:position`]:
+                              prev[`${layer.id}:position`] ?? false,
+                            [`${layer.id}:scale`]:
+                              prev[`${layer.id}:scale`] ?? false,
+                            [`${layer.id}:opacity`]:
+                              prev[`${layer.id}:opacity`] ?? false,
+                          }));
+                        }
                       }}
                     >
                       {layerDetailsOpen[layer.id] ? (
@@ -908,44 +1259,124 @@ export function GlbViewer() {
                     className="space-y-1 rounded-md border bg-background/70 p-2"
                     style={{ marginLeft: `${Math.min(layer.depth, 6) * 10}px` }}
                   >
-                    <p className="text-[11px] text-muted-foreground">
-                      Local: X {layer.position.x}, Y {layer.position.y}, Z {layer.position.z}
-                    </p>
-                    <p className="text-[11px] text-muted-foreground">
-                      World: X {layer.worldPosition.x}, Y {layer.worldPosition.y}, Z {layer.worldPosition.z}
-                    </p>
-                    <div className="grid grid-cols-3 gap-1 pt-1">
-                      <ScrubbableNumberField
-                        label="X"
-                        value={layer.position.x}
-                        onBeginChange={pushHistory}
-                        onValueChange={(next) =>
-                          updateLayerCoordinate(layer.id, "x", next.toString(), {
-                            recordHistory: false,
-                          })
-                        }
-                      />
-                      <ScrubbableNumberField
-                        label="Y"
-                        value={layer.position.y}
-                        onBeginChange={pushHistory}
-                        onValueChange={(next) =>
-                          updateLayerCoordinate(layer.id, "y", next.toString(), {
-                            recordHistory: false,
-                          })
-                        }
-                      />
-                      <ScrubbableNumberField
-                        label="Z"
-                        value={layer.position.z}
-                        onBeginChange={pushHistory}
-                        onValueChange={(next) =>
-                          updateLayerCoordinate(layer.id, "z", next.toString(), {
-                            recordHistory: false,
-                          })
-                        }
-                      />
-                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="w-full justify-between"
+                      onClick={() =>
+                        setLayerSectionOpen((prev) => ({
+                          ...prev,
+                          [`${layer.id}:position`]: !prev[`${layer.id}:position`],
+                        }))
+                      }
+                    >
+                      <span className="text-xs">Position</span>
+                      {layerSectionOpen[`${layer.id}:position`] ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    {layerSectionOpen[`${layer.id}:position`] ? (
+                      <div className="space-y-1 pt-1">
+                        <p className="text-[11px] text-muted-foreground">
+                          Local: X {layer.position.x}, Y {layer.position.y}, Z {layer.position.z}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          World: X {layer.worldPosition.x}, Y {layer.worldPosition.y}, Z {layer.worldPosition.z}
+                        </p>
+                        <div className="grid grid-cols-3 gap-1 pt-1">
+                          <ScrubbableNumberField
+                            label="X"
+                            value={layer.position.x}
+                            onBeginChange={() => beginLayerTransform(layer.id)}
+                            onEndChange={() => commitLayerTransform(layer.id)}
+                            onValueChange={(next) => updateLayerCoordinate(layer.id, "x", next.toString())}
+                          />
+                          <ScrubbableNumberField
+                            label="Y"
+                            value={layer.position.y}
+                            onBeginChange={() => beginLayerTransform(layer.id)}
+                            onEndChange={() => commitLayerTransform(layer.id)}
+                            onValueChange={(next) => updateLayerCoordinate(layer.id, "y", next.toString())}
+                          />
+                          <ScrubbableNumberField
+                            label="Z"
+                            value={layer.position.z}
+                            onBeginChange={() => beginLayerTransform(layer.id)}
+                            onEndChange={() => commitLayerTransform(layer.id)}
+                            onValueChange={(next) => updateLayerCoordinate(layer.id, "z", next.toString())}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="mt-1 w-full justify-between"
+                      onClick={() =>
+                        setLayerSectionOpen((prev) => ({
+                          ...prev,
+                          [`${layer.id}:scale`]: !prev[`${layer.id}:scale`],
+                        }))
+                      }
+                    >
+                      <span className="text-xs">Scale</span>
+                      {layerSectionOpen[`${layer.id}:scale`] ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    {layerSectionOpen[`${layer.id}:scale`] ? (
+                      <div className="space-y-2 pt-1">
+                        <ScrubbableNumberField
+                          label="Uniform"
+                          value={layer.scale.x}
+                          onBeginChange={() => beginLayerScale(layer.id)}
+                          onEndChange={() => commitLayerScale(layer.id)}
+                          onValueChange={(next) =>
+                            updateLayerUniformScale(layer.id, next.toString())
+                          }
+                        />
+                      </div>
+                    ) : null}
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="mt-1 w-full justify-between"
+                      onClick={() =>
+                        setLayerSectionOpen((prev) => ({
+                          ...prev,
+                          [`${layer.id}:opacity`]: !prev[`${layer.id}:opacity`],
+                        }))
+                      }
+                    >
+                      <span className="text-xs">Opacity</span>
+                      {layerSectionOpen[`${layer.id}:opacity`] ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    {layerSectionOpen[`${layer.id}:opacity`] ? (
+                      <div className="space-y-2 pt-1">
+                        <SliderField
+                          label="Opacity"
+                          value={layer.opacity}
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          onChange={(next) => updateLayerOpacity(layer.id, next.toString())}
+                          onCommit={() => commitLayerOpacity(layer.id)}
+                        />
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1004,7 +1435,7 @@ export function GlbViewer() {
               fadeDistance={30}
             />
 
-            <Bounds fit clip={false} observe margin={1.1}>
+            <Bounds fit clip={false} observe={false} margin={1.1}>
               <Center>
                 <primitive object={modelScene} dispose={null} />
               </Center>
@@ -1093,6 +1524,24 @@ export function GlbViewer() {
                 type="button"
                 variant="secondary"
                 className="w-full justify-between"
+                onClick={() => setHistoryOpen((prev) => !prev)}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <History className="h-4 w-4" />
+                  History
+                </span>
+                {historyOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </Button>
+            </CardHeader>
+            {historyOpen ? <CardContent className="pt-0">{historyPanel}</CardContent> : null}
+          </Card>
+
+          <Card className="bg-card/95 backdrop-blur">
+            <CardHeader className="py-3">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full justify-between"
                 onClick={() => setLayersOpen((prev) => !prev)}
               >
                 <span className="inline-flex items-center gap-2">
@@ -1137,12 +1586,12 @@ export function GlbViewer() {
                 <ColorField
                   label="Background color"
                   value={settings.backgroundColor}
-                  onChange={(value) => setSettings((p) => ({ ...p, backgroundColor: value }))}
+                  onChange={(value) => patchSettings({ backgroundColor: value })}
                 />
                 <ToggleField
                   label="Show grid"
                   checked={settings.showGrid}
-                  onChange={(v) => setSettings((p) => ({ ...p, showGrid: v }))}
+                  onChange={(v) => patchSettings({ showGrid: v })}
                 />
               </CardContent>
             </Card>
@@ -1158,12 +1607,12 @@ export function GlbViewer() {
                 <ToggleField
                   label="Enable zoom"
                   checked={settings.orbitEnableZoom}
-                  onChange={(v) => setSettings((p) => ({ ...p, orbitEnableZoom: v }))}
+                  onChange={(v) => patchSettings({ orbitEnableZoom: v })}
                 />
                 <ToggleField
                   label="Auto rotate"
                   checked={settings.orbitAutoRotate}
-                  onChange={(v) => setSettings((p) => ({ ...p, orbitAutoRotate: v }))}
+                  onChange={(v) => patchSettings({ orbitAutoRotate: v })}
                 />
               </CardContent>
             </Card>
@@ -1183,7 +1632,7 @@ export function GlbViewer() {
                 <ToggleField
                   label="Ambient enabled"
                   checked={settings.useAmbientLight}
-                  onChange={(v) => setSettings((p) => ({ ...p, useAmbientLight: v }))}
+                  onChange={(v) => patchSettings({ useAmbientLight: v })}
                 />
                 <SliderField
                   label="Ambient intensity"
@@ -1191,12 +1640,12 @@ export function GlbViewer() {
                   min={0}
                   max={3}
                   step={0.05}
-                  onChange={(v) => setSettings((p) => ({ ...p, ambientIntensity: v }))}
+                  onChange={(v) => patchSettings({ ambientIntensity: v })}
                 />
                 <ToggleField
                   label="Directional enabled"
                   checked={settings.useDirectionalLight}
-                  onChange={(v) => setSettings((p) => ({ ...p, useDirectionalLight: v }))}
+                  onChange={(v) => patchSettings({ useDirectionalLight: v })}
                 />
                 <SliderField
                   label="Directional intensity"
@@ -1204,7 +1653,7 @@ export function GlbViewer() {
                   min={0}
                   max={5}
                   step={0.05}
-                  onChange={(v) => setSettings((p) => ({ ...p, directionalIntensity: v }))}
+                  onChange={(v) => patchSettings({ directionalIntensity: v })}
                 />
                 <SliderField
                   label="Directional X"
@@ -1212,7 +1661,7 @@ export function GlbViewer() {
                   min={-30}
                   max={30}
                   step={0.5}
-                  onChange={(v) => setSettings((p) => ({ ...p, directionalX: v }))}
+                  onChange={(v) => patchSettings({ directionalX: v })}
                 />
                 <SliderField
                   label="Directional Y"
@@ -1220,7 +1669,7 @@ export function GlbViewer() {
                   min={-30}
                   max={30}
                   step={0.5}
-                  onChange={(v) => setSettings((p) => ({ ...p, directionalY: v }))}
+                  onChange={(v) => patchSettings({ directionalY: v })}
                 />
                 <SliderField
                   label="Directional Z"
@@ -1228,7 +1677,7 @@ export function GlbViewer() {
                   min={-30}
                   max={30}
                   step={0.5}
-                  onChange={(v) => setSettings((p) => ({ ...p, directionalZ: v }))}
+                  onChange={(v) => patchSettings({ directionalZ: v })}
                 />
 
                 {pointLights.map((light, index) => (
@@ -1333,6 +1782,7 @@ export function GlbViewer() {
                     onChange={(e) => {
                       setConfigText(e.target.value);
                       setConfigDirty(true);
+                      setHasUnsavedChanges(true);
                       setConfigMessage(null);
                     }}
                     rows={16}
