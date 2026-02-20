@@ -83,6 +83,7 @@ type LayerItem = {
   visible: boolean;
   opacity: number;
   position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number };
   scale: { x: number; y: number; z: number };
   worldPosition: { x: number; y: number; z: number };
 };
@@ -95,6 +96,7 @@ type LayerSnapshot = Record<
     deleted: boolean;
     opacity: number;
     position: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number };
     scale: { x: number; y: number; z: number };
   }
 >;
@@ -298,12 +300,20 @@ function ScrubbableNumberField({
   onBeginChange,
   onValueChange,
   onEndChange,
+  inputStep = "0.01",
+  dragStep = 0.005,
+  dragPixelsPerStep,
+  dragDecimals = 3,
 }: {
   label: string;
   value: number;
   onBeginChange?: () => void;
   onValueChange: (value: number) => void;
   onEndChange?: () => void;
+  inputStep?: string;
+  dragStep?: number;
+  dragPixelsPerStep?: number;
+  dragDecimals?: number;
 }) {
   const dragRef = useRef<{ startX: number; startValue: number; active: boolean } | null>(null);
   const typingRef = useRef(false);
@@ -321,7 +331,11 @@ function ScrubbableNumberField({
       const drag = dragRef.current;
       if (!drag) return;
       const delta = moveEvent.clientX - drag.startX;
-      const next = Number((drag.startValue + delta * 0.005).toFixed(3));
+      const nextRaw =
+        typeof dragPixelsPerStep === "number" && dragPixelsPerStep > 0
+          ? drag.startValue + Math.round(delta / dragPixelsPerStep) * dragStep
+          : drag.startValue + delta * dragStep;
+      const next = Number(nextRaw.toFixed(dragDecimals));
       onValueChange(next);
     };
 
@@ -348,7 +362,7 @@ function ScrubbableNumberField({
       </span>
       <Input
         type="number"
-        step="0.01"
+        step={inputStep}
         value={value}
         onChange={(event) => {
           const parsed = Number(event.target.value);
@@ -419,6 +433,16 @@ function getObjectScaleInfo(object: THREE.Object3D) {
   };
 }
 
+function getObjectRotationInfo(object: THREE.Object3D) {
+  return {
+    rotation: {
+      x: Number(THREE.MathUtils.radToDeg(object.rotation.x).toFixed(2)),
+      y: Number(THREE.MathUtils.radToDeg(object.rotation.y).toFixed(2)),
+      z: Number(THREE.MathUtils.radToDeg(object.rotation.z).toFixed(2)),
+    },
+  };
+}
+
 function getObjectOpacity(object: THREE.Object3D) {
   let opacity = 1;
   let found = false;
@@ -455,6 +479,43 @@ function setObjectUniformScaleFromCenter(object: THREE.Object3D, rawValue: numbe
   if (hasBeforeCenter) beforeBox.getCenter(beforeCenter);
 
   object.scale.set(uniformScale, uniformScale, uniformScale);
+  object.updateMatrixWorld(true);
+
+  if (!hasBeforeCenter) return;
+  const afterBox = new THREE.Box3().setFromObject(object);
+  if (afterBox.isEmpty()) return;
+  const afterCenter = new THREE.Vector3();
+  afterBox.getCenter(afterCenter);
+  const worldDelta = beforeCenter.sub(afterCenter);
+  if (worldDelta.lengthSq() < 1e-12) return;
+
+  const originWorld = new THREE.Vector3();
+  object.getWorldPosition(originWorld);
+  const targetOriginWorld = originWorld.add(worldDelta);
+  if (object.parent) {
+    const targetLocal = object.parent.worldToLocal(targetOriginWorld.clone());
+    object.position.copy(targetLocal);
+  } else {
+    object.position.copy(targetOriginWorld);
+  }
+  object.updateMatrixWorld(true);
+}
+
+function setObjectRotationFromCenter(
+  object: THREE.Object3D,
+  degrees: { x: number; y: number; z: number }
+) {
+  const beforeBox = new THREE.Box3().setFromObject(object);
+  const beforeCenter = new THREE.Vector3();
+  const hasBeforeCenter = !beforeBox.isEmpty();
+  if (hasBeforeCenter) beforeBox.getCenter(beforeCenter);
+
+  object.rotation.set(
+    THREE.MathUtils.degToRad(degrees.x),
+    THREE.MathUtils.degToRad(degrees.y),
+    THREE.MathUtils.degToRad(degrees.z),
+    object.rotation.order
+  );
   object.updateMatrixWorld(true);
 
   if (!hasBeforeCenter) return;
@@ -516,6 +577,7 @@ function getLayerItems(scene: THREE.Object3D): {
       visible: object.visible,
       opacity: getObjectOpacity(object),
       ...getObjectPositionInfo(object),
+      ...getObjectRotationInfo(object),
       ...getObjectScaleInfo(object),
     };
     items.push(item);
@@ -561,6 +623,7 @@ export function GlbViewer() {
   const historyIndexRef = useRef(0);
   const pendingTransformLayerIdsRef = useRef<Set<string>>(new Set());
   const pendingScaleLayerIdsRef = useRef<Set<string>>(new Set());
+  const pendingRotationLayerIdsRef = useRef<Set<string>>(new Set());
 
   const hasModel = modelScene !== null;
   const undoCount = historyIndex;
@@ -664,6 +727,11 @@ export function GlbViewer() {
                 y: object.position.y,
                 z: object.position.z,
               },
+              rotation: {
+                x: object.rotation.x,
+                y: object.rotation.y,
+                z: object.rotation.z,
+              },
               scale: {
                 x: object.scale.x,
                 y: object.scale.y,
@@ -683,6 +751,7 @@ export function GlbViewer() {
           );
           pendingTransformLayerIdsRef.current.clear();
           pendingScaleLayerIdsRef.current.clear();
+          pendingRotationLayerIdsRef.current.clear();
           if (previousScene) disposeScene(previousScene);
           setUploadOpen(false);
           setLayersOpen(true);
@@ -821,6 +890,11 @@ export function GlbViewer() {
           y: object.position.y,
           z: object.position.z,
         },
+        rotation: {
+          x: object.rotation.x,
+          y: object.rotation.y,
+          z: object.rotation.z,
+        },
         scale: {
           x: object.scale.x,
           y: object.scale.y,
@@ -842,6 +916,7 @@ export function GlbViewer() {
           visible: object.visible,
           opacity: getObjectOpacity(object),
           ...getObjectPositionInfo(object),
+          ...getObjectRotationInfo(object),
           ...getObjectScaleInfo(object),
         };
       })
@@ -876,6 +951,12 @@ export function GlbViewer() {
       object.visible = value.visible;
       setObjectOpacity(object, value.opacity ?? 1);
       object.position.set(value.position.x, value.position.y, value.position.z);
+      object.rotation.set(
+        value.rotation?.x ?? object.rotation.x,
+        value.rotation?.y ?? object.rotation.y,
+        value.rotation?.z ?? object.rotation.z,
+        object.rotation.order
+      );
       object.scale.set(value.scale?.x ?? 1, value.scale?.y ?? 1, value.scale?.z ?? 1);
       object.updateMatrixWorld();
       if (value.deleted) {
@@ -963,6 +1044,7 @@ export function GlbViewer() {
     if (!object) return;
     const info = {
       ...getObjectPositionInfo(object),
+      ...getObjectRotationInfo(object),
       ...getObjectScaleInfo(object),
     };
     setLayerItems((prev) =>
@@ -987,6 +1069,27 @@ export function GlbViewer() {
     const value = Number(rawValue);
     if (Number.isNaN(value)) return;
     setObjectUniformScaleFromCenter(object, value);
+    syncLayerTransform(layerId);
+    setHasUnsavedChanges(true);
+  };
+
+  const updateLayerRotationCoordinate = (
+    layerId: string,
+    axis: "x" | "y" | "z",
+    rawValue: string
+  ) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    if (!object) return;
+    const value = Number(rawValue);
+    if (Number.isNaN(value)) return;
+    const rounded = Number(value.toFixed(2));
+    const current = getObjectRotationInfo(object).rotation;
+    const nextRotation = {
+      x: axis === "x" ? rounded : current.x,
+      y: axis === "y" ? rounded : current.y,
+      z: axis === "z" ? rounded : current.z,
+    };
+    setObjectRotationFromCenter(object, nextRotation);
     syncLayerTransform(layerId);
     setHasUnsavedChanges(true);
   };
@@ -1028,6 +1131,16 @@ export function GlbViewer() {
     if (!pendingScaleLayerIdsRef.current.has(layerId)) return;
     pendingScaleLayerIdsRef.current.delete(layerId);
     pushHistory(`Scale: ${getLayerName(layerId)}`);
+  };
+
+  const beginLayerRotation = (layerId: string) => {
+    pendingRotationLayerIdsRef.current.add(layerId);
+  };
+
+  const commitLayerRotation = (layerId: string) => {
+    if (!pendingRotationLayerIdsRef.current.has(layerId)) return;
+    pendingRotationLayerIdsRef.current.delete(layerId);
+    pushHistory(`Rotate: ${getLayerName(layerId)}`);
   };
 
   const startRenameLayer = (layerId: string) => {
@@ -1223,6 +1336,8 @@ export function GlbViewer() {
                             ...prev,
                             [`${layer.id}:position`]:
                               prev[`${layer.id}:position`] ?? false,
+                            [`${layer.id}:rotation`]:
+                              prev[`${layer.id}:rotation`] ?? false,
                             [`${layer.id}:scale`]:
                               prev[`${layer.id}:scale`] ?? false,
                             [`${layer.id}:opacity`]:
@@ -1307,6 +1422,71 @@ export function GlbViewer() {
                             onBeginChange={() => beginLayerTransform(layer.id)}
                             onEndChange={() => commitLayerTransform(layer.id)}
                             onValueChange={(next) => updateLayerCoordinate(layer.id, "z", next.toString())}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="mt-1 w-full justify-between"
+                      onClick={() =>
+                        setLayerSectionOpen((prev) => ({
+                          ...prev,
+                          [`${layer.id}:rotation`]: !prev[`${layer.id}:rotation`],
+                        }))
+                      }
+                    >
+                      <span className="text-xs">Rotation (deg)</span>
+                      {layerSectionOpen[`${layer.id}:rotation`] ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    {layerSectionOpen[`${layer.id}:rotation`] ? (
+                      <div className="space-y-1 pt-1">
+                        <div className="grid grid-cols-3 gap-1 pt-1">
+                          <ScrubbableNumberField
+                            label="X"
+                            value={layer.rotation.x}
+                            onBeginChange={() => beginLayerRotation(layer.id)}
+                            onEndChange={() => commitLayerRotation(layer.id)}
+                            inputStep="1"
+                            dragStep={1}
+                            dragPixelsPerStep={8}
+                            dragDecimals={2}
+                            onValueChange={(next) =>
+                              updateLayerRotationCoordinate(layer.id, "x", next.toString())
+                            }
+                          />
+                          <ScrubbableNumberField
+                            label="Y"
+                            value={layer.rotation.y}
+                            onBeginChange={() => beginLayerRotation(layer.id)}
+                            onEndChange={() => commitLayerRotation(layer.id)}
+                            inputStep="1"
+                            dragStep={1}
+                            dragPixelsPerStep={8}
+                            dragDecimals={2}
+                            onValueChange={(next) =>
+                              updateLayerRotationCoordinate(layer.id, "y", next.toString())
+                            }
+                          />
+                          <ScrubbableNumberField
+                            label="Z"
+                            value={layer.rotation.z}
+                            onBeginChange={() => beginLayerRotation(layer.id)}
+                            onEndChange={() => commitLayerRotation(layer.id)}
+                            inputStep="1"
+                            dragStep={1}
+                            dragPixelsPerStep={8}
+                            dragDecimals={2}
+                            onValueChange={(next) =>
+                              updateLayerRotationCoordinate(layer.id, "z", next.toString())
+                            }
                           />
                         </div>
                       </div>
