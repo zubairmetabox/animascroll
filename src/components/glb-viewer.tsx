@@ -77,9 +77,11 @@ type ConfigPayload = {
 
 type LayerItem = {
   id: string;
+  parentId: string | null;
   name: string;
   type: string;
   depth: number;
+  hasChildren: boolean;
   visible: boolean;
   opacity: number;
   position: { x: number; y: number; z: number };
@@ -557,6 +559,15 @@ function getLayerItems(scene: THREE.Object3D): {
     if (object === scene) return;
     if (!isTransformableLayer(object)) return;
 
+    const parentId = (() => {
+      let current: THREE.Object3D | null = object.parent;
+      while (current && current !== scene) {
+        if (isTransformableLayer(current)) return current.uuid;
+        current = current.parent;
+      }
+      return null;
+    })();
+
     const depth = (() => {
       let d = 0;
       let current: THREE.Object3D | null = object.parent;
@@ -571,9 +582,11 @@ function getLayerItems(scene: THREE.Object3D): {
       object.name.trim().length > 0 ? object.name : `${object.type} ${unnamedCounter++}`;
     const item: LayerItem = {
       id: object.uuid,
+      parentId,
       name,
       type: object.type,
       depth,
+      hasChildren: object.children.some((child) => isTransformableLayer(child)),
       visible: object.visible,
       opacity: getObjectOpacity(object),
       ...getObjectPositionInfo(object),
@@ -612,6 +625,7 @@ export function GlbViewer() {
   const [renameValue, setRenameValue] = useState("");
   const [layerDetailsOpen, setLayerDetailsOpen] = useState<Record<string, boolean>>({});
   const [layerSectionOpen, setLayerSectionOpen] = useState<Record<string, boolean>>({});
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(new Set());
   const [deletedLayerIds, setDeletedLayerIds] = useState<Set<string>>(new Set());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [configText, setConfigText] = useState("");
@@ -729,6 +743,7 @@ export function GlbViewer() {
           setRenameValue("");
           setLayerDetailsOpen({});
           setLayerSectionOpen({});
+          setCollapsedGroupIds(new Set());
           const emptyDeleted = new Set<string>();
           setDeletedLayerIds(emptyDeleted);
           deletedLayerIdsRef.current = emptyDeleted;
@@ -1072,6 +1087,11 @@ export function GlbViewer() {
     idsToDelete.forEach((id) => nextDeleted.add(id));
     deletedLayerIdsRef.current = nextDeleted;
     setDeletedLayerIds(nextDeleted);
+    setCollapsedGroupIds((prev) => {
+      const next = new Set(prev);
+      idsToDelete.forEach((id) => next.delete(id));
+      return next;
+    });
 
     if (selectedLayerId && idsToDelete.includes(selectedLayerId)) {
       setSelectedLayerId(null);
@@ -1351,13 +1371,26 @@ export function GlbViewer() {
 
   const layersPanel = (
     <div className="space-y-3">
-      {layerItems.filter((layer) => !deletedLayerIds.has(layer.id)).length === 0 ? (
-        <p className="text-xs text-muted-foreground">No layers found for this model.</p>
-      ) : (
-        <div className="max-h-[60vh] space-y-1 overflow-y-auto pr-1">
-            {layerItems
-              .filter((layer) => !deletedLayerIds.has(layer.id))
-              .map((layer) => (
+      {(() => {
+        const byId = new Map(layerItems.map((layer) => [layer.id, layer]));
+        const visibleLayerItems = layerItems.filter((layer) => {
+          if (deletedLayerIds.has(layer.id)) return false;
+          let currentParentId = layer.parentId;
+          while (currentParentId) {
+            if (collapsedGroupIds.has(currentParentId)) return false;
+            const parent = byId.get(currentParentId);
+            currentParentId = parent?.parentId ?? null;
+          }
+          return true;
+        });
+
+        if (visibleLayerItems.length === 0) {
+          return <p className="text-xs text-muted-foreground">No layers found for this model.</p>;
+        }
+
+        return (
+          <div className="max-h-[60vh] space-y-1 overflow-y-auto pr-1">
+            {visibleLayerItems.map((layer) => (
               <div key={layer.id} className="space-y-1">
                 <div
                   className={cn(
@@ -1375,6 +1408,36 @@ export function GlbViewer() {
                     });
                   }}
                 >
+                  {layer.hasChildren ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="mr-1 h-6 w-6 p-0"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setCollapsedGroupIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(layer.id)) {
+                            next.delete(layer.id);
+                          } else {
+                            next.add(layer.id);
+                          }
+                          return next;
+                        });
+                      }}
+                      title={collapsedGroupIds.has(layer.id) ? "Expand group" : "Collapse group"}
+                    >
+                      {collapsedGroupIds.has(layer.id) ? (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                  ) : (
+                    <span className="mr-1 inline-block h-6 w-6" />
+                  )}
+
                   <button
                     type="button"
                     className="flex min-w-0 flex-1 flex-col pr-2 text-left"
@@ -1658,8 +1721,9 @@ export function GlbViewer() {
                 ) : null}
               </div>
             ))}
-        </div>
-      )}
+          </div>
+        );
+      })()}
     </div>
   );
 
