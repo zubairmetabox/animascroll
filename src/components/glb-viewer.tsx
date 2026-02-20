@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Bounds, Center, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -9,6 +9,8 @@ import {
   Box,
   Camera,
   Check,
+  Clock3,
+  ChevronLeft,
   ChevronDown,
   ChevronRight,
   Circle,
@@ -108,6 +110,17 @@ type HistoryEntry = {
   id: string;
   label: string;
   snapshot: LayerSnapshot;
+};
+
+type AnimationKeyframe = {
+  atVh: number;
+  value: number;
+};
+
+type AnimationTrack = {
+  layerId: string;
+  propertyId: string;
+  keyframes: AnimationKeyframe[];
 };
 
 type ViewMode = "edit" | "animate";
@@ -642,6 +655,7 @@ export function GlbViewer() {
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [timelineExpandedLayerIds, setTimelineExpandedLayerIds] = useState<Set<string>>(new Set());
   const [timelinePanelHeight, setTimelinePanelHeight] = useState(260);
+  const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
   const [showCustomize, setShowCustomize] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -682,6 +696,14 @@ export function GlbViewer() {
   const undoActionRef = useRef<() => void>(() => {});
   const redoActionRef = useRef<() => void>(() => {});
   const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const timelineSeekDragRef = useRef(false);
+  const timelineRulerRef = useRef<HTMLDivElement | null>(null);
+  const applyTimelinePropertyValueRef = useRef<
+    (layer: LayerItem, propertyId: string, rawValue: string) => void
+  >(() => {});
+  const commitTimelinePropertyEditRef = useRef<
+    (layer: LayerItem, propertyId: string) => void
+  >(() => {});
   const timelineModifierDragRef = useRef<{
     layerId: string;
     propertyId: string;
@@ -782,22 +804,32 @@ export function GlbViewer() {
       }
 
       const modifierDrag = timelineModifierDragRef.current;
-      if (!modifierDrag) return;
-      const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
-      if (!layer) return;
-      const deltaX = event.clientX - modifierDrag.startX;
-      const step = modifierDrag.propertyId.startsWith("rotation.") ? 1 : 0.01;
-      const nextRaw = modifierDrag.startValue + Math.round(deltaX / 8) * step;
-      const decimals = modifierDrag.propertyId.startsWith("rotation.") ? 2 : 3;
-      applyTimelinePropertyValue(layer, modifierDrag.propertyId, nextRaw.toFixed(decimals));
+      if (modifierDrag) {
+        const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
+        if (!layer) return;
+        const deltaX = event.clientX - modifierDrag.startX;
+        const step = modifierDrag.propertyId.startsWith("rotation.") ? 1 : 0.01;
+        const nextRaw = modifierDrag.startValue + Math.round(deltaX / 8) * step;
+        const decimals = modifierDrag.propertyId.startsWith("rotation.") ? 2 : 3;
+        applyTimelinePropertyValueRef.current(layer, modifierDrag.propertyId, nextRaw.toFixed(decimals));
+      }
+
+      if (timelineSeekDragRef.current && timelineRulerRef.current) {
+        const rect = timelineRulerRef.current.getBoundingClientRect();
+        const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+        const next = THREE.MathUtils.clamp(ratio * timelineLengthVh, 0, timelineLengthVh);
+        setTimelineCurrentVh(Number(next.toFixed(2)));
+        setTimelineProgress(THREE.MathUtils.clamp(next / Math.max(1, timelineLengthVh), 0, 1));
+      }
     };
     const onPointerUp = () => {
       timelineResizeRef.current = null;
+      timelineSeekDragRef.current = false;
       const modifierDrag = timelineModifierDragRef.current;
       if (modifierDrag) {
         const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
         if (layer) {
-          commitTimelinePropertyEdit(layer, modifierDrag.propertyId);
+          commitTimelinePropertyEditRef.current(layer, modifierDrag.propertyId);
         }
       }
       timelineModifierDragRef.current = null;
@@ -808,7 +840,7 @@ export function GlbViewer() {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
     };
-  }, [layerItems]);
+  }, [layerItems, timelineLengthVh]);
 
   const patchSettings = (patch: Partial<ViewerSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
@@ -865,6 +897,113 @@ export function GlbViewer() {
       }
     });
     return rows;
+  };
+
+  const getTrackIndex = (layerId: string, propertyId: string) =>
+    animationTracks.findIndex(
+      (track) => track.layerId === layerId && track.propertyId === propertyId
+    );
+
+  const getTrack = (layerId: string, propertyId: string) => {
+    const index = getTrackIndex(layerId, propertyId);
+    if (index < 0) return null;
+    return animationTracks[index];
+  };
+
+  const setTimelineSeekVh = useCallback((value: number) => {
+    const next = THREE.MathUtils.clamp(value, 0, timelineLengthVh);
+    setTimelineCurrentVh(Number(next.toFixed(2)));
+    setTimelineProgress(THREE.MathUtils.clamp(next / Math.max(1, timelineLengthVh), 0, 1));
+  }, [timelineLengthVh]);
+
+  const hasTrackKeyframes = (layerId: string, propertyId: string) => {
+    const track = getTrack(layerId, propertyId);
+    if (!track) return false;
+    return track.keyframes.length > 0;
+  };
+
+  const hasKeyframeAtCurrentTime = (layerId: string, propertyId: string) => {
+    const track = getTrack(layerId, propertyId);
+    if (!track) return false;
+    const atVh = Number(timelineCurrentVh.toFixed(2));
+    return track.keyframes.some((kf) => Number(kf.atVh.toFixed(2)) === atVh);
+  };
+
+  const toggleTrackAnimation = (layer: LayerItem, propertyId: string, enabled: boolean) => {
+    setAnimationTracks((prev) => {
+      const index = prev.findIndex(
+        (track) => track.layerId === layer.id && track.propertyId === propertyId
+      );
+      if (!enabled) {
+        if (index < 0) return prev;
+        return prev.filter((_, i) => i !== index);
+      }
+
+      const atVh = Number(timelineCurrentVh.toFixed(2));
+      const value = Number(getTimelinePropertyValue(layer, propertyId).toFixed(4));
+      if (index < 0) {
+        return [...prev, { layerId: layer.id, propertyId, keyframes: [{ atVh, value }] }];
+      }
+      const next = [...prev];
+      const keyframes = [...next[index].keyframes];
+      const existing = keyframes.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
+      if (existing >= 0) keyframes[existing] = { atVh, value };
+      else keyframes.push({ atVh, value });
+      keyframes.sort((a, b) => a.atVh - b.atVh);
+      next[index] = { ...next[index], keyframes };
+      return next;
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const navigateTrackKeyframe = (
+    layerId: string,
+    propertyId: string,
+    direction: "prev" | "next"
+  ) => {
+    const track = getTrack(layerId, propertyId);
+    if (!track || track.keyframes.length === 0) return;
+    const current = Number(timelineCurrentVh.toFixed(2));
+    if (direction === "prev") {
+      const candidates = track.keyframes.filter((kf) => kf.atVh < current - 1e-6);
+      const target = candidates.at(-1) ?? track.keyframes[0];
+      setTimelineSeekVh(target.atVh);
+      return;
+    }
+    const candidates = track.keyframes.filter((kf) => kf.atVh > current + 1e-6);
+    const target = candidates[0] ?? track.keyframes[track.keyframes.length - 1];
+    setTimelineSeekVh(target.atVh);
+  };
+
+  const upsertKeyframeAtCurrentTime = (layer: LayerItem, propertyId: string) => {
+    const atVh = Number(timelineCurrentVh.toFixed(2));
+    const value = Number(getTimelinePropertyValue(layer, propertyId).toFixed(4));
+    setAnimationTracks((prev) => {
+      const next = [...prev];
+      const index = next.findIndex(
+        (track) => track.layerId === layer.id && track.propertyId === propertyId
+      );
+      if (index < 0) {
+        next.push({
+          layerId: layer.id,
+          propertyId,
+          keyframes: [{ atVh, value }],
+        });
+        return next;
+      }
+
+      const keyframes = [...next[index].keyframes];
+      const existing = keyframes.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
+      if (existing >= 0) {
+        keyframes[existing] = { atVh, value };
+      } else {
+        keyframes.push({ atVh, value });
+      }
+      keyframes.sort((a, b) => a.atVh - b.atVh);
+      next[index] = { ...next[index], keyframes };
+      return next;
+    });
+    setHasUnsavedChanges(true);
   };
 
   const getDepthShade = (depth: number) => {
@@ -944,6 +1083,11 @@ export function GlbViewer() {
     else if (propertyId === "scale.uniform") commitLayerScale(layer.id);
     else if (propertyId === "opacity") commitLayerOpacity(layer.id);
   };
+
+  useEffect(() => {
+    applyTimelinePropertyValueRef.current = applyTimelinePropertyValue;
+    commitTimelinePropertyEditRef.current = commitTimelinePropertyEdit;
+  });
 
   const startTimelineModifierDrag = (
     event: React.PointerEvent<HTMLSpanElement>,
@@ -1030,6 +1174,7 @@ export function GlbViewer() {
           setLayerSectionOpen({});
           setCollapsedGroupIds(new Set());
           setTimelineExpandedLayerIds(new Set());
+          setAnimationTracks([]);
           setViewMode("edit");
           setCameraView(DEFAULT_CAMERA_VIEW);
           const emptyDeleted = new Set<string>();
@@ -2530,6 +2675,23 @@ export function GlbViewer() {
               <div className="flex items-center justify-between gap-3">
                 <div className="text-xs font-medium">Timeline</div>
                 <div className="flex items-center gap-2">
+                  <Label htmlFor="timeline-current-vh" className="text-xs text-muted-foreground">
+                    Current (vh)
+                  </Label>
+                  <Input
+                    id="timeline-current-vh"
+                    type="number"
+                    min={0}
+                    max={timelineLengthVh}
+                    step={0.01}
+                    value={timelineCurrentVh}
+                    onChange={(event) => {
+                      const parsed = Number(event.target.value);
+                      if (Number.isNaN(parsed)) return;
+                      setTimelineSeekVh(parsed);
+                    }}
+                    className="h-8 w-24 text-xs"
+                  />
                   <Label htmlFor="timeline-length" className="text-xs text-muted-foreground">
                     Length (vh)
                   </Label>
@@ -2572,11 +2734,11 @@ export function GlbViewer() {
                   return (
                     <div className="overflow-auto" style={{ maxHeight: `${timelinePanelHeight}px` }}>
                       <div style={{ width: `${320 + trackWidth}px` }}>
-                        <div className="grid grid-cols-[320px_1fr] border-b">
-                          <div className="sticky left-0 z-20 border-r bg-card px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                        <div className="sticky top-0 z-30 grid grid-cols-[320px_1fr] border-b bg-card">
+                          <div className="sticky left-0 z-30 border-r bg-card px-2 py-1 text-[11px] font-medium text-muted-foreground">
                             Layers
                           </div>
-                          <div className="relative h-7">
+                          <div ref={timelineRulerRef} className="relative h-7 bg-card">
                             {Array.from({ length: markerCount + 1 }).map((_, index) => {
                               const valueVh = index * markerStep;
                               const left = (valueVh / timelineLengthVh) * 100;
@@ -2597,6 +2759,27 @@ export function GlbViewer() {
                               className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-primary"
                               style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
                             />
+                            <button
+                              type="button"
+                              className="absolute top-0 z-20 h-4 w-4 -translate-x-1/2 cursor-ew-resize"
+                              style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
+                              onPointerDown={(event) => {
+                                event.preventDefault();
+                                timelineSeekDragRef.current = true;
+                                if (timelineRulerRef.current) {
+                                  const rect = timelineRulerRef.current.getBoundingClientRect();
+                                  const ratio = THREE.MathUtils.clamp(
+                                    (event.clientX - rect.left) / Math.max(1, rect.width),
+                                    0,
+                                    1
+                                  );
+                                  setTimelineSeekVh(ratio * timelineLengthVh);
+                                }
+                              }}
+                              title="Drag playhead"
+                            >
+                              <span className="absolute left-1/2 top-0 h-0 w-0 -translate-x-1/2 border-l-[6px] border-r-[6px] border-t-[10px] border-l-transparent border-r-transparent border-t-primary" />
+                            </button>
                           </div>
                         </div>
 
@@ -2680,27 +2863,105 @@ export function GlbViewer() {
                               </div>
                             ) : (
                               <div
-                                className="sticky left-0 z-20 flex h-7 items-center gap-1 border-r bg-card px-2 text-[11px] text-muted-foreground"
+                                className="sticky left-0 z-20 flex h-7 min-w-0 items-center gap-1 border-r bg-card px-2 text-[11px] text-muted-foreground"
                                 style={{
                                   backgroundColor: `rgba(241, 245, 249, ${Math.max(0.18, getDepthShade(row.layer.depth) * 0.28)})`,
                                 }}
                               >
-                                <span className="inline-block w-8" />
-                                <span
-                                  className={cn(
-                                    "inline-flex items-center gap-1",
-                                    row.layer.depth > 0 ? "border-l-2 border-slate-500/70 pl-2" : "",
-                                    "cursor-ew-resize select-none"
-                                  )}
-                                  style={{ marginLeft: `${Math.min(row.layer.depth + 1, 7) * 10}px` }}
-                                  title="Drag left/right to change value"
-                                  onPointerDown={(event) =>
-                                    startTimelineModifierDrag(event, row.layer, row.propertyId)
+                                <span className="inline-block w-6 shrink-0" />
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-5 w-5 shrink-0 p-0"
+                                  onClick={() =>
+                                    toggleTrackAnimation(
+                                      row.layer,
+                                      row.propertyId,
+                                      !hasTrackKeyframes(row.layer.id, row.propertyId)
+                                    )
+                                  }
+                                  title={
+                                    hasTrackKeyframes(row.layer.id, row.propertyId)
+                                      ? "Disable animation (remove keyframes)"
+                                      : "Enable animation"
                                   }
                                 >
-                                  <Diamond className="h-3 w-3 rotate-45" />
-                                  {row.label}
-                                </span>
+                                  <Clock3
+                                    className={cn(
+                                      "h-3.5 w-3.5",
+                                      hasTrackKeyframes(row.layer.id, row.propertyId)
+                                        ? "text-primary"
+                                        : "text-muted-foreground"
+                                    )}
+                                  />
+                                </Button>
+                                <div className="min-w-0 flex-1">
+                                  <span
+                                    className={cn(
+                                      "inline-flex min-w-0 items-center gap-1 truncate whitespace-nowrap",
+                                      row.layer.depth > 0 ? "border-l-2 border-slate-500/70 pl-2" : "",
+                                      "cursor-ew-resize select-none"
+                                    )}
+                                    style={{ marginLeft: `${Math.min(row.layer.depth + 1, 7) * 10}px` }}
+                                    title="Drag left/right to change value"
+                                    onPointerDown={(event) =>
+                                      startTimelineModifierDrag(event, row.layer, row.propertyId)
+                                    }
+                                  >
+                                    <span className="truncate whitespace-nowrap">{row.label}</span>
+                                  </span>
+                                </div>
+                                <div className="flex w-[54px] shrink-0 items-center justify-end gap-0.5">
+                                  {hasTrackKeyframes(row.layer.id, row.propertyId) ? (
+                                    <>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-4 w-4 p-0"
+                                        onClick={() => navigateTrackKeyframe(row.layer.id, row.propertyId, "prev")}
+                                        title="Previous keyframe"
+                                      >
+                                        <ChevronLeft className="h-3 w-3" />
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-4 w-4 p-0"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          upsertKeyframeAtCurrentTime(row.layer, row.propertyId);
+                                        }}
+                                        title={
+                                          hasKeyframeAtCurrentTime(row.layer.id, row.propertyId)
+                                            ? "Overwrite keyframe at current seek"
+                                            : "Add keyframe at current seek"
+                                        }
+                                      >
+                                        <Diamond
+                                          className={cn(
+                                            "h-2.5 w-2.5 rotate-45",
+                                            hasKeyframeAtCurrentTime(row.layer.id, row.propertyId)
+                                              ? "fill-primary text-primary"
+                                              : "text-muted-foreground"
+                                          )}
+                                        />
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-4 w-4 p-0"
+                                        onClick={() => navigateTrackKeyframe(row.layer.id, row.propertyId, "next")}
+                                        title="Next keyframe"
+                                      >
+                                        <ChevronRight className="h-3 w-3" />
+                                      </Button>
+                                    </>
+                                  ) : null}
+                                </div>
                                 <Input
                                   type="number"
                                   step={getTimelinePropertyStep(row.propertyId)}
@@ -2710,7 +2971,7 @@ export function GlbViewer() {
                                   onChange={(event) =>
                                     applyTimelinePropertyValue(row.layer, row.propertyId, event.target.value)
                                   }
-                                  className="ml-auto h-6 w-24 text-[11px]"
+                                  className="h-6 w-16 shrink-0 text-[11px]"
                                 />
                               </div>
                             )}
@@ -2728,10 +2989,40 @@ export function GlbViewer() {
                                     ? `rgba(100, 116, 139, ${getDepthShade(row.layer.depth) * 0.85})`
                                     : `rgba(241, 245, 249, ${Math.max(0.12, getDepthShade(row.layer.depth) * 0.22)})`,
                               }}
+                              onClick={(event) => {
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                const ratio = THREE.MathUtils.clamp(
+                                  (event.clientX - rect.left) / Math.max(1, rect.width),
+                                  0,
+                                  1
+                                );
+                                setTimelineSeekVh(ratio * timelineLengthVh);
+                              }}
                             >
-                              {row.kind === "property" ? (
-                                <span className="absolute right-2 top-1/2 h-2 w-2 -translate-y-1/2 rotate-45 border border-muted-foreground/70 bg-background/90" />
-                              ) : null}
+                              {row.kind === "property"
+                                ? (() => {
+                                    const track = getTrack(row.layer.id, row.propertyId);
+                                    if (!track || track.keyframes.length === 0) return null;
+                                    return track.keyframes.map((kf, idx) => (
+                                      <span
+                                        key={`kf-${row.layer.id}-${row.propertyId}-${idx}`}
+                                        className={cn(
+                                          "absolute top-1/2 h-2 w-2 -translate-y-1/2 -translate-x-1/2 rotate-45 border bg-background/95",
+                                          Number(kf.atVh.toFixed(2)) === Number(timelineCurrentVh.toFixed(2))
+                                            ? "border-primary bg-primary"
+                                            : "border-muted-foreground/70"
+                                        )}
+                                        style={{
+                                          left: `${THREE.MathUtils.clamp(
+                                            kf.atVh / Math.max(1, timelineLengthVh),
+                                            0,
+                                            1
+                                          ) * 100}%`,
+                                        }}
+                                      />
+                                    ));
+                                  })()
+                                : null}
                               <span
                                 className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-primary"
                                 style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
