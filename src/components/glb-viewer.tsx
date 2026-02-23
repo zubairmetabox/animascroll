@@ -736,6 +736,20 @@ export function GlbViewer() {
   rubberBandVhRef.current = rubberBandVh;
   timelineCurrentVhRef.current = timelineCurrentVh;
 
+  const togglePlayRef = useRef<() => void>(() => {});
+  togglePlayRef.current = () => {
+    if (isPlaying) {
+      setIsPlaying(false);
+      return;
+    }
+    if (timelineCurrentVhRef.current >= timelineLengthVh) {
+      timelineCurrentVhRef.current = 0;
+      setTimelineCurrentVh(0);
+      setTimelineProgress(0);
+    }
+    setIsPlaying(true);
+  };
+
   const hasModel = modelScene !== null;
   const undoCount = historyIndex;
   const redoCount = Math.max(0, historyEntries.length - 1 - historyIndex);
@@ -1726,7 +1740,7 @@ export function GlbViewer() {
 
       if (key === " " && viewMode === "animate") {
         event.preventDefault();
-        setIsPlaying((p) => !p);
+        togglePlayRef.current();
         return;
       }
 
@@ -2985,7 +2999,7 @@ export function GlbViewer() {
                     size="sm"
                     variant="outline"
                     className="h-7 w-7 p-0"
-                    onClick={() => setIsPlaying((p) => !p)}
+                    onClick={() => togglePlayRef.current()}
                     title={isPlaying ? "Pause (Space)" : "Play (Space)"}
                   >
                     {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
