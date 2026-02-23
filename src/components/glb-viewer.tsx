@@ -23,6 +23,8 @@ import {
   Lightbulb,
   Layers3,
   PanelLeft,
+  Pause,
+  Play,
   Plus,
   RotateCcw,
   Redo2,
@@ -653,6 +655,7 @@ export function GlbViewer() {
   const [timelineCurrentVh, setTimelineCurrentVh] = useState(0);
   const [timelineProgress, setTimelineProgress] = useState(0);
   const [timelineZoom, setTimelineZoom] = useState(1);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [timelineExpandedLayerIds, setTimelineExpandedLayerIds] = useState<Set<string>>(new Set());
   const [timelinePanelHeight, setTimelinePanelHeight] = useState(260);
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
@@ -698,6 +701,10 @@ export function GlbViewer() {
   const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const timelineSeekDragRef = useRef(false);
   const timelineRulerRef = useRef<HTMLDivElement | null>(null);
+  const [timelineScrollEl, setTimelineScrollEl] = useState<HTMLDivElement | null>(null);
+  const playbackRafRef = useRef<number | null>(null);
+  const lastPlayTimestampRef = useRef<number>(0);
+  const timelineCurrentVhRef = useRef(0);
   const applyTimelinePropertyValueRef = useRef<
     (layer: LayerItem, propertyId: string, rawValue: string) => void
   >(() => {});
@@ -710,6 +717,10 @@ export function GlbViewer() {
     startX: number;
     startValue: number;
   } | null>(null);
+  const snapKeyframeVhRef = useRef<(rawVh: number, shiftKey: boolean) => number>((v) => v);
+  const layerItemsRef = useRef<LayerItem[]>([]);
+  layerItemsRef.current = layerItems;
+  timelineCurrentVhRef.current = timelineCurrentVh;
 
   const hasModel = modelScene !== null;
   const undoCount = historyIndex;
@@ -795,11 +806,24 @@ export function GlbViewer() {
   }, [layerContextMenu]);
 
   useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+        active.blur();
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, []);
+
+  useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
       const drag = timelineResizeRef.current;
       if (drag) {
         const delta = drag.startY - event.clientY;
-        const next = THREE.MathUtils.clamp(Math.round(drag.startHeight + delta), 160, 560);
+        const next = THREE.MathUtils.clamp(Math.round(drag.startHeight + delta), 28, 560);
         setTimelinePanelHeight(next);
       }
 
@@ -817,7 +841,8 @@ export function GlbViewer() {
       if (timelineSeekDragRef.current && timelineRulerRef.current) {
         const rect = timelineRulerRef.current.getBoundingClientRect();
         const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-        const next = THREE.MathUtils.clamp(ratio * timelineLengthVh, 0, timelineLengthVh);
+        const raw = THREE.MathUtils.clamp(ratio * timelineLengthVh, 0, timelineLengthVh);
+        const next = snapKeyframeVhRef.current(raw, event.shiftKey);
         setTimelineCurrentVh(Number(next.toFixed(2)));
         setTimelineProgress(THREE.MathUtils.clamp(next / Math.max(1, timelineLengthVh), 0, 1));
       }
@@ -910,6 +935,34 @@ export function GlbViewer() {
     return animationTracks[index];
   };
 
+  snapKeyframeVhRef.current = (rawVh: number, shiftKey: boolean): number => {
+    if (!shiftKey) return rawVh;
+    const SNAP_THRESHOLD = timelineLengthVh * 0.03;
+    let best = rawVh;
+    let bestDist = SNAP_THRESHOLD;
+    for (const track of animationTracks) {
+      for (const kf of track.keyframes) {
+        const dist = Math.abs(kf.atVh - rawVh);
+        if (dist < bestDist) { bestDist = dist; best = kf.atVh; }
+      }
+    }
+    return best;
+  };
+
+  const evaluateTrackAtVh = (track: AnimationTrack, atVh: number): number => {
+    const kfs = track.keyframes;
+    if (kfs.length === 0) return 0;
+    if (kfs.length === 1 || atVh <= kfs[0].atVh) return kfs[0].value;
+    if (atVh >= kfs[kfs.length - 1].atVh) return kfs[kfs.length - 1].value;
+    for (let i = 0; i < kfs.length - 1; i++) {
+      if (kfs[i].atVh <= atVh && kfs[i + 1].atVh >= atVh) {
+        const t = (atVh - kfs[i].atVh) / Math.max(1e-9, kfs[i + 1].atVh - kfs[i].atVh);
+        return kfs[i].value + t * (kfs[i + 1].value - kfs[i].value);
+      }
+    }
+    return kfs[kfs.length - 1].value;
+  };
+
   const setTimelineSeekVh = useCallback((value: number) => {
     const next = THREE.MathUtils.clamp(value, 0, timelineLengthVh);
     setTimelineCurrentVh(Number(next.toFixed(2)));
@@ -977,7 +1030,25 @@ export function GlbViewer() {
 
   const upsertKeyframeAtCurrentTime = (layer: LayerItem, propertyId: string) => {
     const atVh = Number(timelineCurrentVh.toFixed(2));
-    const value = Number(getTimelinePropertyValue(layer, propertyId).toFixed(4));
+    // Read from the live Three.js object so we never get stale React state
+    const liveObject = layerObjectMapRef.current.get(layer.id);
+    let rawValue: number;
+    if (liveObject) {
+      switch (propertyId) {
+        case "position.x": rawValue = liveObject.position.x; break;
+        case "position.y": rawValue = liveObject.position.y; break;
+        case "position.z": rawValue = liveObject.position.z; break;
+        case "rotation.x": rawValue = getObjectRotationInfo(liveObject).rotation.x; break;
+        case "rotation.y": rawValue = getObjectRotationInfo(liveObject).rotation.y; break;
+        case "rotation.z": rawValue = getObjectRotationInfo(liveObject).rotation.z; break;
+        case "scale.uniform": rawValue = liveObject.scale.x; break;
+        case "opacity": rawValue = getObjectOpacity(liveObject); break;
+        default: rawValue = getTimelinePropertyValue(layer, propertyId);
+      }
+    } else {
+      rawValue = getTimelinePropertyValue(layer, propertyId);
+    }
+    const value = Number(rawValue.toFixed(4));
     setAnimationTracks((prev) => {
       const next = [...prev];
       const index = next.findIndex(
@@ -1082,12 +1153,75 @@ export function GlbViewer() {
     else if (propertyId.startsWith("rotation.")) commitLayerRotation(layer.id);
     else if (propertyId === "scale.uniform") commitLayerScale(layer.id);
     else if (propertyId === "opacity") commitLayerOpacity(layer.id);
+    // If a keyframe already exists at this position, save the edited value into it
+    const atVh = Number(timelineCurrentVh.toFixed(2));
+    const track = getTrack(layer.id, propertyId);
+    if (track?.keyframes.some((kf) => Number(kf.atVh.toFixed(2)) === atVh)) {
+      upsertKeyframeAtCurrentTime(layer, propertyId);
+    }
   };
 
   useEffect(() => {
     applyTimelinePropertyValueRef.current = applyTimelinePropertyValue;
     commitTimelinePropertyEditRef.current = commitTimelinePropertyEdit;
   });
+
+  useEffect(() => {
+    if (animationTracks.length === 0) return;
+    for (const track of animationTracks) {
+      const layer = layerItemsRef.current.find((l) => l.id === track.layerId);
+      if (!layer) continue;
+      const value = evaluateTrackAtVh(track, timelineCurrentVh);
+      applyTimelinePropertyValueRef.current(layer, track.propertyId, String(value));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timelineCurrentVh, animationTracks]);
+
+  const PLAYBACK_SPEED_VH_PER_SEC = 50;
+  useEffect(() => {
+    if (!isPlaying) {
+      if (playbackRafRef.current !== null) {
+        cancelAnimationFrame(playbackRafRef.current);
+        playbackRafRef.current = null;
+      }
+      return;
+    }
+    lastPlayTimestampRef.current = performance.now();
+    const tick = (now: number) => {
+      const delta = (now - lastPlayTimestampRef.current) / 1000;
+      lastPlayTimestampRef.current = now;
+      const nextVh = Math.min(
+        timelineCurrentVhRef.current + delta * PLAYBACK_SPEED_VH_PER_SEC,
+        timelineLengthVh
+      );
+      timelineCurrentVhRef.current = nextVh;
+      setTimelineCurrentVh(Number(nextVh.toFixed(2)));
+      setTimelineProgress(nextVh / Math.max(1, timelineLengthVh));
+      if (nextVh >= timelineLengthVh) {
+        setIsPlaying(false);
+        return;
+      }
+      playbackRafRef.current = requestAnimationFrame(tick);
+    };
+    playbackRafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (playbackRafRef.current !== null) {
+        cancelAnimationFrame(playbackRafRef.current);
+        playbackRafRef.current = null;
+      }
+    };
+  }, [isPlaying, timelineLengthVh]);
+
+  useEffect(() => {
+    if (!timelineScrollEl) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      adjustTimelineZoom(event.deltaY < 0 ? "in" : "out");
+    };
+    timelineScrollEl.addEventListener("wheel", onWheel, { passive: false });
+    return () => timelineScrollEl.removeEventListener("wheel", onWheel);
+  }, [timelineScrollEl, timelineZoom]);
 
   const startTimelineModifierDrag = (
     event: React.PointerEvent<HTMLSpanElement>,
@@ -1096,6 +1230,7 @@ export function GlbViewer() {
   ) => {
     event.preventDefault();
     event.stopPropagation();
+    (document.activeElement as HTMLElement)?.blur();
     beginTimelinePropertyEdit(layer, propertyId);
     timelineModifierDragRef.current = {
       layerId: layer.id,
@@ -1503,6 +1638,13 @@ export function GlbViewer() {
       if (isTypingElement(event.target)) return;
       const key = event.key.toLowerCase();
       const mod = event.ctrlKey || event.metaKey;
+
+      if (key === " " && viewMode === "animate") {
+        event.preventDefault();
+        setIsPlaying((p) => !p);
+        return;
+      }
+
       if (!mod) return;
 
       if (key === "z") {
@@ -1523,7 +1665,7 @@ export function GlbViewer() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [hasModel]);
+  }, [hasModel, viewMode]);
 
   const deleteLayer = (layerId: string) => {
     const object = layerObjectMapRef.current.get(layerId);
@@ -2659,21 +2801,34 @@ export function GlbViewer() {
 
       {hasModel && viewMode === "animate" ? (
         <aside className="pointer-events-none absolute bottom-0 left-0 right-0 z-40">
-          <div
-            className="pointer-events-auto mb-1 h-2 cursor-ns-resize rounded-sm bg-border/80"
-            onPointerDown={(event) => {
-              event.preventDefault();
-              timelineResizeRef.current = {
-                startY: event.clientY,
-                startHeight: timelinePanelHeight,
-              };
-            }}
-            title="Drag to resize timeline height"
-          />
           <Card className="pointer-events-auto border bg-card/95 backdrop-blur">
             <CardContent className="space-y-3 p-3">
+              <div className="flex justify-center -mt-1 -mx-3 mb-1 pt-1">
+                <div
+                  className="h-1.5 w-20 cursor-ns-resize rounded-full bg-border hover:bg-border/60 active:bg-primary/60 transition-colors"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    timelineResizeRef.current = {
+                      startY: event.clientY,
+                      startHeight: timelinePanelHeight,
+                    };
+                  }}
+                  title="Drag to resize timeline height"
+                />
+              </div>
               <div className="flex items-center justify-between gap-3">
-                <div className="text-xs font-medium">Timeline</div>
+                <div className="flex items-center gap-2">
+                  <div className="text-xs font-medium">Timeline</div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 w-7 p-0"
+                    onClick={() => setIsPlaying((p) => !p)}
+                    title={isPlaying ? "Pause (Space)" : "Play (Space)"}
+                  >
+                    {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                  </Button>
+                </div>
                 <div className="flex items-center gap-2">
                   <Label htmlFor="timeline-current-vh" className="text-xs text-muted-foreground">
                     Current (vh)
@@ -2727,18 +2882,38 @@ export function GlbViewer() {
               <div className="rounded-md border bg-background/70">
                 {(() => {
                   const timelineRows = getTimelineRows();
-                  const trackWidth = Math.max(1200, timelineLengthVh * 3 * timelineZoom);
+                  const trackWidth = Math.max(1200, timelineLengthVh * 3) * timelineZoom;
                   const markerStep =
                     timelineLengthVh <= 200 ? 25 : timelineLengthVh <= 500 ? 50 : 100;
                   const markerCount = Math.floor(timelineLengthVh / markerStep);
                   return (
-                    <div className="overflow-auto" style={{ maxHeight: `${timelinePanelHeight}px` }}>
-                      <div style={{ width: `${320 + trackWidth}px` }}>
-                        <div className="sticky top-0 z-30 grid grid-cols-[320px_1fr] border-b bg-card">
+                    <div
+                      ref={setTimelineScrollEl}
+                      className="overflow-auto"
+                      style={{ maxHeight: `${timelinePanelHeight}px` }}
+                    >
+                      <div style={{ width: `${320 + 12 + trackWidth}px` }}>
+                        <div className="sticky top-0 z-30 grid grid-cols-[320px_12px_1fr] border-b bg-card">
                           <div className="sticky left-0 z-30 border-r bg-card px-2 py-1 text-[11px] font-medium text-muted-foreground">
                             Layers
                           </div>
-                          <div ref={timelineRulerRef} className="relative h-7 bg-card">
+                          <div className="border-r border-border/40 bg-muted/50" />
+                          <div
+                            ref={timelineRulerRef}
+                            className="relative h-7 bg-card"
+                            onPointerDown={(event) => {
+                              event.preventDefault();
+                              setIsPlaying(false);
+                              timelineSeekDragRef.current = true;
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              const ratio = THREE.MathUtils.clamp(
+                                (event.clientX - rect.left) / Math.max(1, rect.width),
+                                0,
+                                1
+                              );
+                              setTimelineSeekVh(snapKeyframeVhRef.current(ratio * timelineLengthVh, event.shiftKey));
+                            }}
+                          >
                             {Array.from({ length: markerCount + 1 }).map((_, index) => {
                               const valueVh = index * markerStep;
                               const left = (valueVh / timelineLengthVh) * 100;
@@ -2765,6 +2940,9 @@ export function GlbViewer() {
                               style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
                               onPointerDown={(event) => {
                                 event.preventDefault();
+                                event.stopPropagation();
+                                (document.activeElement as HTMLElement)?.blur();
+                                setIsPlaying(false);
                                 timelineSeekDragRef.current = true;
                                 if (timelineRulerRef.current) {
                                   const rect = timelineRulerRef.current.getBoundingClientRect();
@@ -2773,7 +2951,7 @@ export function GlbViewer() {
                                     0,
                                     1
                                   );
-                                  setTimelineSeekVh(ratio * timelineLengthVh);
+                                  setTimelineSeekVh(snapKeyframeVhRef.current(ratio * timelineLengthVh, event.shiftKey));
                                 }
                               }}
                               title="Drag playhead"
@@ -2784,7 +2962,7 @@ export function GlbViewer() {
                         </div>
 
                         {timelineRows.map((row) => (
-                          <div key={row.key} className="grid grid-cols-[320px_1fr] border-b last:border-b-0">
+                          <div key={row.key} className="grid grid-cols-[320px_12px_1fr] border-b last:border-b-0">
                             {row.kind === "layer" ? (
                               <div
                                 className={cn(
@@ -2976,6 +3154,7 @@ export function GlbViewer() {
                               </div>
                             )}
 
+                            <div className="border-r border-border/40 bg-muted/50" />
                             <div
                               className={cn(
                                 "relative",
@@ -2990,13 +3169,14 @@ export function GlbViewer() {
                                     : `rgba(241, 245, 249, ${Math.max(0.12, getDepthShade(row.layer.depth) * 0.22)})`,
                               }}
                               onClick={(event) => {
+                                setIsPlaying(false);
                                 const rect = event.currentTarget.getBoundingClientRect();
                                 const ratio = THREE.MathUtils.clamp(
                                   (event.clientX - rect.left) / Math.max(1, rect.width),
                                   0,
                                   1
                                 );
-                                setTimelineSeekVh(ratio * timelineLengthVh);
+                                setTimelineSeekVh(snapKeyframeVhRef.current(ratio * timelineLengthVh, event.shiftKey));
                               }}
                             >
                               {row.kind === "property"
