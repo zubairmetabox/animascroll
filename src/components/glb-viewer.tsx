@@ -659,6 +659,8 @@ export function GlbViewer() {
   const [timelineExpandedLayerIds, setTimelineExpandedLayerIds] = useState<Set<string>>(new Set());
   const [timelinePanelHeight, setTimelinePanelHeight] = useState(260);
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
+  const [selectedKfIds, setSelectedKfIds] = useState<Set<string>>(new Set());
+  const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number } | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -719,7 +721,19 @@ export function GlbViewer() {
   } | null>(null);
   const snapKeyframeVhRef = useRef<(rawVh: number, shiftKey: boolean) => number>((v) => v);
   const layerItemsRef = useRef<LayerItem[]>([]);
+  const clipboardKfsRef = useRef<{ layerId: string; propertyId: string; relVh: number; value: number }[]>([]);
+  const retimeDragRef = useRef<{
+    startX: number;
+    snapshot: { id: string; layerId: string; propertyId: string; origAtVh: number }[];
+  } | null>(null);
+  const rubberBandRef = useRef<{ startVh: number; startX: number } | null>(null);
+  const animationTracksRef = useRef<AnimationTrack[]>([]);
+  const timelineZoomRef = useRef(1);
+  const rubberBandVhRef = useRef<{ a: number; b: number } | null>(null);
   layerItemsRef.current = layerItems;
+  animationTracksRef.current = animationTracks;
+  timelineZoomRef.current = timelineZoom;
+  rubberBandVhRef.current = rubberBandVh;
   timelineCurrentVhRef.current = timelineCurrentVh;
 
   const hasModel = modelScene !== null;
@@ -838,6 +852,46 @@ export function GlbViewer() {
         applyTimelinePropertyValueRef.current(layer, modifierDrag.propertyId, nextRaw.toFixed(decimals));
       }
 
+      // Retime drag — move selected keyframes horizontally
+      if (retimeDragRef.current) {
+        const { startX, snapshot } = retimeDragRef.current;
+        const dx = event.clientX - startX;
+        const trackWidth = Math.max(1200, timelineLengthVh * 3) * timelineZoomRef.current;
+        const deltaVh = (dx / trackWidth) * timelineLengthVh;
+        setAnimationTracks((prev) => {
+          const next = [...prev];
+          for (const s of snapshot) {
+            const idx = next.findIndex((t) => t.layerId === s.layerId && t.propertyId === s.propertyId);
+            if (idx < 0) continue;
+            const newAtVh = Number(THREE.MathUtils.clamp(s.origAtVh + deltaVh, 0, timelineLengthVh).toFixed(2));
+            const kfs = next[idx].keyframes.map((kf) =>
+              Number(kf.atVh.toFixed(2)) === Number(s.origAtVh.toFixed(2)) ? { ...kf, atVh: newAtVh } : kf
+            );
+            kfs.sort((a, b) => a.atVh - b.atVh);
+            next[idx] = { ...next[idx], keyframes: kfs };
+          }
+          return next;
+        });
+        setSelectedKfIds(new Set(
+          snapshot.map((s) => {
+            const newAtVh = Number(THREE.MathUtils.clamp(s.origAtVh + deltaVh, 0, timelineLengthVh).toFixed(2));
+            return makeKfId(s.layerId, s.propertyId, newAtVh);
+          })
+        ));
+        return; // don't seek while retiming
+      }
+
+      // Rubber-band selection update
+      if (rubberBandRef.current && timelineRulerRef.current) {
+        if (Math.abs(event.clientX - rubberBandRef.current.startX) > 5) {
+          timelineSeekDragRef.current = false; // stop seek when rubber-band kicks in
+          const rect = timelineRulerRef.current.getBoundingClientRect();
+          const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+          const currentVh = ratio * timelineLengthVh;
+          setRubberBandVh({ a: rubberBandRef.current.startVh, b: currentVh });
+        }
+      }
+
       if (timelineSeekDragRef.current && timelineRulerRef.current) {
         const rect = timelineRulerRef.current.getBoundingClientRect();
         const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
@@ -850,6 +904,34 @@ export function GlbViewer() {
     const onPointerUp = () => {
       timelineResizeRef.current = null;
       timelineSeekDragRef.current = false;
+
+      // Commit retime drag
+      retimeDragRef.current = null;
+
+      // Commit rubber-band selection
+      const wasRubberBand = rubberBandRef.current !== null;
+      rubberBandRef.current = null;
+      if (wasRubberBand) {
+        const range = rubberBandVhRef.current;
+        if (range) {
+          const lo = Math.min(range.a, range.b);
+          const hi = Math.max(range.a, range.b);
+          const newSel = new Set<string>();
+          for (const track of animationTracksRef.current) {
+            for (const kf of track.keyframes) {
+              if (kf.atVh >= lo && kf.atVh <= hi) {
+                newSel.add(makeKfId(track.layerId, track.propertyId, kf.atVh));
+              }
+            }
+          }
+          setSelectedKfIds(newSel);
+          setRubberBandVh(null);
+        } else {
+          // Short click without drag → deselect all
+          setSelectedKfIds(new Set());
+        }
+      }
+
       const modifierDrag = timelineModifierDragRef.current;
       if (modifierDrag) {
         const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
@@ -934,6 +1016,9 @@ export function GlbViewer() {
     if (index < 0) return null;
     return animationTracks[index];
   };
+
+  const makeKfId = (layerId: string, propertyId: string, atVh: number) =>
+    `${layerId}::${propertyId}::${atVh.toFixed(2)}`;
 
   snapKeyframeVhRef.current = (rawVh: number, shiftKey: boolean): number => {
     if (!shiftKey) return rawVh;
@@ -1666,6 +1751,83 @@ export function GlbViewer() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [hasModel, viewMode]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (viewMode !== "animate") return;
+      const tag = (event.target as HTMLElement)?.tagName?.toUpperCase?.() ?? "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const key = event.key.toLowerCase();
+      const mod = event.ctrlKey || event.metaKey;
+
+      if (key === "escape") {
+        setSelectedKfIds(new Set());
+        return;
+      }
+
+      if ((key === "delete" || key === "backspace") && selectedKfIds.size > 0) {
+        event.preventDefault();
+        setAnimationTracks((prev) =>
+          prev
+            .map((track) => ({
+              ...track,
+              keyframes: track.keyframes.filter(
+                (kf) => !selectedKfIds.has(makeKfId(track.layerId, track.propertyId, kf.atVh))
+              ),
+            }))
+            .filter((track) => track.keyframes.length > 0)
+        );
+        setSelectedKfIds(new Set());
+        return;
+      }
+
+      if (mod && key === "c" && selectedKfIds.size > 0) {
+        event.preventDefault();
+        const entries: typeof clipboardKfsRef.current = [];
+        let anchor = Infinity;
+        for (const track of animationTracks) {
+          for (const kf of track.keyframes) {
+            if (selectedKfIds.has(makeKfId(track.layerId, track.propertyId, kf.atVh))) {
+              if (kf.atVh < anchor) anchor = kf.atVh;
+              entries.push({ layerId: track.layerId, propertyId: track.propertyId, relVh: kf.atVh, value: kf.value });
+            }
+          }
+        }
+        const base = isFinite(anchor) ? anchor : 0;
+        clipboardKfsRef.current = entries.map((e) => ({ ...e, relVh: e.relVh - base }));
+        return;
+      }
+
+      if (mod && key === "v" && clipboardKfsRef.current.length > 0) {
+        event.preventDefault();
+        const anchorVh = timelineCurrentVh;
+        setAnimationTracks((prev) => {
+          const next = [...prev];
+          for (const entry of clipboardKfsRef.current) {
+            const atVh = Number((anchorVh + entry.relVh).toFixed(2));
+            if (atVh < 0 || atVh > timelineLengthVh) continue;
+            const idx = next.findIndex(
+              (t) => t.layerId === entry.layerId && t.propertyId === entry.propertyId
+            );
+            if (idx < 0) {
+              next.push({ layerId: entry.layerId, propertyId: entry.propertyId, keyframes: [{ atVh, value: entry.value }] });
+            } else {
+              const kfs = [...next[idx].keyframes];
+              const existing = kfs.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
+              if (existing >= 0) kfs[existing] = { atVh, value: entry.value };
+              else kfs.push({ atVh, value: entry.value });
+              kfs.sort((a, b) => a.atVh - b.atVh);
+              next[idx] = { ...next[idx], keyframes: kfs };
+            }
+          }
+          return next;
+        });
+        return;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [viewMode, selectedKfIds, animationTracks, timelineCurrentVh, timelineLengthVh]);
 
   const deleteLayer = (layerId: string) => {
     const object = layerObjectMapRef.current.get(layerId);
@@ -3168,7 +3330,9 @@ export function GlbViewer() {
                                     ? `rgba(100, 116, 139, ${getDepthShade(row.layer.depth) * 0.85})`
                                     : `rgba(241, 245, 249, ${Math.max(0.12, getDepthShade(row.layer.depth) * 0.22)})`,
                               }}
-                              onClick={(event) => {
+                              onPointerDown={(event) => {
+                                if (event.button !== 0) return;
+                                (document.activeElement as HTMLElement)?.blur();
                                 setIsPlaying(false);
                                 const rect = event.currentTarget.getBoundingClientRect();
                                 const ratio = THREE.MathUtils.clamp(
@@ -3176,33 +3340,78 @@ export function GlbViewer() {
                                   0,
                                   1
                                 );
-                                setTimelineSeekVh(snapKeyframeVhRef.current(ratio * timelineLengthVh, event.shiftKey));
+                                const startVh = ratio * timelineLengthVh;
+                                rubberBandRef.current = { startVh, startX: event.clientX };
+                                timelineSeekDragRef.current = true;
+                                setTimelineSeekVh(snapKeyframeVhRef.current(startVh, event.shiftKey));
                               }}
                             >
                               {row.kind === "property"
                                 ? (() => {
                                     const track = getTrack(row.layer.id, row.propertyId);
                                     if (!track || track.keyframes.length === 0) return null;
-                                    return track.keyframes.map((kf, idx) => (
-                                      <span
-                                        key={`kf-${row.layer.id}-${row.propertyId}-${idx}`}
-                                        className={cn(
-                                          "absolute top-1/2 h-2 w-2 -translate-y-1/2 -translate-x-1/2 rotate-45 border bg-background/95",
-                                          Number(kf.atVh.toFixed(2)) === Number(timelineCurrentVh.toFixed(2))
-                                            ? "border-primary bg-primary"
-                                            : "border-muted-foreground/70"
-                                        )}
-                                        style={{
-                                          left: `${THREE.MathUtils.clamp(
-                                            kf.atVh / Math.max(1, timelineLengthVh),
-                                            0,
-                                            1
-                                          ) * 100}%`,
-                                        }}
-                                      />
-                                    ));
+                                    return track.keyframes.map((kf, idx) => {
+                                      const kfId = makeKfId(track.layerId, track.propertyId, kf.atVh);
+                                      const isSelected = selectedKfIds.has(kfId);
+                                      const isAtPlayhead = Number(kf.atVh.toFixed(2)) === Number(timelineCurrentVh.toFixed(2));
+                                      return (
+                                        <span
+                                          key={`kf-${row.layer.id}-${row.propertyId}-${idx}`}
+                                          className={cn(
+                                            "absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 -translate-x-1/2 rotate-45 border",
+                                            isSelected
+                                              ? "z-10 border-primary bg-primary/60"
+                                              : isAtPlayhead
+                                                ? "border-primary bg-primary"
+                                                : "border-muted-foreground/70 bg-background/95"
+                                          )}
+                                          style={{
+                                            left: `${THREE.MathUtils.clamp(
+                                              kf.atVh / Math.max(1, timelineLengthVh),
+                                              0,
+                                              1
+                                            ) * 100}%`,
+                                          }}
+                                          onPointerDown={(event) => {
+                                            event.stopPropagation();
+                                            (document.activeElement as HTMLElement)?.blur();
+                                            let nextSelected: Set<string>;
+                                            if (event.shiftKey) {
+                                              nextSelected = new Set(selectedKfIds);
+                                              if (nextSelected.has(kfId)) nextSelected.delete(kfId);
+                                              else nextSelected.add(kfId);
+                                            } else {
+                                              nextSelected = selectedKfIds.has(kfId) && selectedKfIds.size === 1
+                                                ? new Set(selectedKfIds)
+                                                : new Set([kfId]);
+                                            }
+                                            setSelectedKfIds(nextSelected);
+                                            // Start retime drag with snapshot of all selected
+                                            const snapshot: { id: string; layerId: string; propertyId: string; origAtVh: number }[] = [];
+                                            for (const t of animationTracksRef.current) {
+                                              for (const k of t.keyframes) {
+                                                const kid = makeKfId(t.layerId, t.propertyId, k.atVh);
+                                                if (nextSelected.has(kid)) {
+                                                  snapshot.push({ id: kid, layerId: t.layerId, propertyId: t.propertyId, origAtVh: k.atVh });
+                                                }
+                                              }
+                                            }
+                                            retimeDragRef.current = { startX: event.clientX, snapshot };
+                                          }}
+                                        />
+                                      );
+                                    });
                                   })()
                                 : null}
+                              {rubberBandVh && (
+                                <div
+                                  className="pointer-events-none absolute inset-y-0 z-20 border border-primary/50 bg-primary/10"
+                                  style={{
+                                    left: `${(Math.min(rubberBandVh.a, rubberBandVh.b) / Math.max(1, timelineLengthVh)) * 100}%`,
+                                    width: `${(Math.abs(rubberBandVh.b - rubberBandVh.a) / Math.max(1, timelineLengthVh)) * 100}%`,
+                                  }}
+                                />
+                              )}
                               <span
                                 className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-primary"
                                 style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
