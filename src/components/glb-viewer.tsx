@@ -654,6 +654,7 @@ export function GlbViewer() {
   const [timelineProgress, setTimelineProgress] = useState(0);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [hasMovedInNavigate, setHasMovedInNavigate] = useState(false);
   const [timelineExpandedLayerIds, setTimelineExpandedLayerIds] = useState<Set<string>>(new Set());
   const [timelinePanelHeight, setTimelinePanelHeight] = useState(260);
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
@@ -1693,6 +1694,7 @@ export function GlbViewer() {
         zoom: camera.zoom,
       };
     }
+    setHasMovedInNavigate(false);
     setViewMode("navigate");
   };
 
@@ -2553,6 +2555,7 @@ export function GlbViewer() {
               enablePan={viewMode === "navigate"}
               enableZoom={viewMode === "navigate" && settings.orbitEnableZoom}
               autoRotate={viewMode === "navigate" && settings.orbitAutoRotate}
+              onChange={() => { if (viewMode === "navigate") setHasMovedInNavigate(true); }}
             />
           </Canvas>
         ) : (
@@ -2648,7 +2651,8 @@ export function GlbViewer() {
               <Button
                 size="sm"
                 variant="outline"
-                className="border-primary/50 text-primary hover:bg-primary/10"
+                disabled={!hasMovedInNavigate}
+                className="border-primary/50 text-primary hover:bg-primary/10 disabled:opacity-40"
                 onClick={() => {
                   const controls = orbitControlsRef.current;
                   const camera = cameraRef.current;
@@ -2659,6 +2663,7 @@ export function GlbViewer() {
                     fov: camera.fov,
                     zoom: camera.zoom,
                   };
+                  setHasMovedInNavigate(false);
                 }}
               >
                 Set Animate View
