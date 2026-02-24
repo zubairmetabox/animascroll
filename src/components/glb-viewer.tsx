@@ -762,22 +762,6 @@ export function GlbViewer() {
     deletedLayerIdsRef.current = deletedLayerIds;
   }, [deletedLayerIds]);
 
-  // Capture post-Bounds camera position once per model load (one rAF so Bounds has positioned the camera)
-  useEffect(() => {
-    if (!hasModel) return;
-    const raf = requestAnimationFrame(() => {
-      const controls = orbitControlsRef.current;
-      const camera = cameraRef.current;
-      if (!controls || !camera) return;
-      defaultCameraViewRef.current = {
-        position: [camera.position.x, camera.position.y, camera.position.z],
-        target: [controls.target.x, controls.target.y, controls.target.z],
-        fov: camera.fov,
-        zoom: camera.zoom,
-      };
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [hasModel]);
 
   useEffect(() => {
     const container = viewerRef.current;
@@ -1406,6 +1390,7 @@ export function GlbViewer() {
           setCollapsedGroupIds(new Set());
           setTimelineExpandedLayerIds(new Set());
           setAnimationTracks([]);
+          defaultCameraViewRef.current = null;
           setViewMode("animate");
           const emptyDeleted = new Set<string>();
           setDeletedLayerIds(emptyDeleted);
@@ -1690,11 +1675,24 @@ export function GlbViewer() {
   };
 
   const enterAnimateMode = () => {
-    applyCameraView(defaultCameraViewRef.current ?? DEFAULT_CAMERA_VIEW);
+    if (defaultCameraViewRef.current) {
+      applyCameraView(defaultCameraViewRef.current);
+    }
     setViewMode("animate");
   };
 
   const enterNavigateMode = () => {
+    // Capture the camera exactly as the user sees it now — Bounds fly-in is long done at this point
+    const controls = orbitControlsRef.current;
+    const camera = cameraRef.current;
+    if (controls && camera) {
+      defaultCameraViewRef.current = {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+        fov: camera.fov,
+        zoom: camera.zoom,
+      };
+    }
     setViewMode("navigate");
   };
 
