@@ -697,6 +697,7 @@ export function GlbViewer() {
   const pendingRotationLayerIdsRef = useRef<Set<string>>(new Set());
   const undoActionRef = useRef<() => void>(() => {});
   const redoActionRef = useRef<() => void>(() => {});
+  const defaultCameraViewRef = useRef<{ position: [number,number,number]; target: [number,number,number]; fov: number; zoom: number } | null>(null);
   const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const timelineSeekDragRef = useRef(false);
   const timelineRulerRef = useRef<HTMLDivElement | null>(null);
@@ -760,6 +761,23 @@ export function GlbViewer() {
   useEffect(() => {
     deletedLayerIdsRef.current = deletedLayerIds;
   }, [deletedLayerIds]);
+
+  // Capture post-Bounds camera position once per model load (one rAF so Bounds has positioned the camera)
+  useEffect(() => {
+    if (!hasModel) return;
+    const raf = requestAnimationFrame(() => {
+      const controls = orbitControlsRef.current;
+      const camera = cameraRef.current;
+      if (!controls || !camera) return;
+      defaultCameraViewRef.current = {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+        fov: camera.fov,
+        zoom: camera.zoom,
+      };
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [hasModel]);
 
   useEffect(() => {
     const container = viewerRef.current;
@@ -1672,7 +1690,7 @@ export function GlbViewer() {
   };
 
   const enterAnimateMode = () => {
-    applyCameraView(DEFAULT_CAMERA_VIEW);
+    applyCameraView(defaultCameraViewRef.current ?? DEFAULT_CAMERA_VIEW);
     setViewMode("animate");
   };
 
@@ -2528,7 +2546,7 @@ export function GlbViewer() {
             <OrbitControls
               ref={orbitControlsRef}
               makeDefault
-              enableDamping
+              enableDamping={viewMode === "navigate"}
               dampingFactor={0.1}
               minDistance={0.02}
               maxDistance={100000}
