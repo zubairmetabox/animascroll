@@ -21,7 +21,6 @@ import {
   Globe2,
   History,
   Lightbulb,
-  Layers3,
   PanelLeft,
   Pause,
   Play,
@@ -125,7 +124,7 @@ type AnimationTrack = {
   keyframes: AnimationKeyframe[];
 };
 
-type ViewMode = "edit" | "animate";
+type ViewMode = "navigate" | "animate";
 
 type CameraView = {
   position: [number, number, number];
@@ -649,8 +648,7 @@ export function GlbViewer() {
   const [layerMessage, setLayerMessage] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("edit");
-  const [cameraView, setCameraView] = useState<CameraView>(DEFAULT_CAMERA_VIEW);
+  const [viewMode, setViewMode] = useState<ViewMode>("animate");
   const [timelineLengthVh, setTimelineLengthVh] = useState(200);
   const [timelineCurrentVh, setTimelineCurrentVh] = useState(0);
   const [timelineProgress, setTimelineProgress] = useState(0);
@@ -664,7 +662,6 @@ export function GlbViewer() {
   const [showCustomize, setShowCustomize] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [layersOpen, setLayersOpen] = useState(true);
   const [settings, setSettings] = useState<ViewerSettings>(DEFAULT_SETTINGS);
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
   const [layerItems, setLayerItems] = useState<LayerItem[]>([]);
@@ -763,12 +760,6 @@ export function GlbViewer() {
   useEffect(() => {
     deletedLayerIdsRef.current = deletedLayerIds;
   }, [deletedLayerIds]);
-
-  useEffect(() => {
-    if (!hasModel) return;
-    if (viewMode !== "animate") return;
-    applyCameraView(cameraView);
-  }, [hasModel, viewMode, cameraView]);
 
   useEffect(() => {
     const container = viewerRef.current;
@@ -1339,18 +1330,6 @@ export function GlbViewer() {
     };
   };
 
-  const readCurrentCameraView = (): CameraView | null => {
-    const controls = orbitControlsRef.current;
-    const camera = cameraRef.current;
-    if (!controls || !camera) return null;
-    return {
-      position: [camera.position.x, camera.position.y, camera.position.z],
-      target: [controls.target.x, controls.target.y, controls.target.z],
-      fov: camera.fov,
-      zoom: camera.zoom,
-    };
-  };
-
   const applyCameraView = (view: CameraView) => {
     const controls = orbitControlsRef.current;
     const camera = cameraRef.current;
@@ -1409,8 +1388,7 @@ export function GlbViewer() {
           setCollapsedGroupIds(new Set());
           setTimelineExpandedLayerIds(new Set());
           setAnimationTracks([]);
-          setViewMode("edit");
-          setCameraView(DEFAULT_CAMERA_VIEW);
+          setViewMode("animate");
           const emptyDeleted = new Set<string>();
           setDeletedLayerIds(emptyDeleted);
           deletedLayerIdsRef.current = emptyDeleted;
@@ -1454,7 +1432,6 @@ export function GlbViewer() {
           pendingRotationLayerIdsRef.current.clear();
           if (previousScene) disposeScene(previousScene);
           setUploadOpen(false);
-          setLayersOpen(true);
           setIsLoading(false);
         },
         (error) => {
@@ -1695,23 +1672,12 @@ export function GlbViewer() {
   };
 
   const enterAnimateMode = () => {
-    const view = readCurrentCameraView();
-    if (view) {
-      setCameraView(view);
-    }
+    applyCameraView(DEFAULT_CAMERA_VIEW);
     setViewMode("animate");
-    const container = viewerRef.current;
-    if (container) {
-      container.scrollTo({ top: 0, behavior: "auto" });
-    }
   };
 
-  const enterEditMode = () => {
-    setViewMode("edit");
-    const container = viewerRef.current;
-    if (container) {
-      container.scrollTo({ top: 0, behavior: "auto" });
-    }
+  const enterNavigateMode = () => {
+    setViewMode("navigate");
   };
 
   useEffect(() => {
@@ -2520,8 +2486,8 @@ export function GlbViewer() {
             <PerspectiveCamera
               ref={cameraRef}
               makeDefault
-              position={cameraView.position}
-              fov={cameraView.fov}
+              position={DEFAULT_CAMERA_VIEW.position}
+              fov={DEFAULT_CAMERA_VIEW.fov}
               near={0.001}
               far={100000}
             />
@@ -2548,7 +2514,7 @@ export function GlbViewer() {
             )}
 
             <SceneGrid
-              show={settings.showGrid && viewMode === "edit"}
+              show={settings.showGrid && viewMode === "navigate"}
               size={20}
               divisions={20}
               fadeDistance={30}
@@ -2566,11 +2532,11 @@ export function GlbViewer() {
               dampingFactor={0.1}
               minDistance={0.02}
               maxDistance={100000}
-              enabled={viewMode === "edit"}
-              enableRotate={viewMode === "edit"}
-              enablePan={viewMode === "edit"}
-              enableZoom={viewMode === "edit" && settings.orbitEnableZoom}
-              autoRotate={viewMode === "edit" && settings.orbitAutoRotate}
+              enabled={viewMode === "navigate"}
+              enableRotate={viewMode === "navigate"}
+              enablePan={viewMode === "navigate"}
+              enableZoom={viewMode === "navigate" && settings.orbitEnableZoom}
+              autoRotate={viewMode === "navigate" && settings.orbitAutoRotate}
             />
           </Canvas>
         ) : (
@@ -2584,7 +2550,7 @@ export function GlbViewer() {
 
       {!hasModel ? <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div> : null}
 
-      {hasModel ? (
+      {hasModel && viewMode === "animate" ? (
         <aside className="absolute left-4 top-4 z-40 w-[340px] space-y-2">
           <div className="flex items-center gap-2">
             <Button
@@ -2621,63 +2587,41 @@ export function GlbViewer() {
           </div>
           {layerMessage ? <p className="text-xs text-muted-foreground">{layerMessage}</p> : null}
 
-          {viewMode === "edit" ? (
-            <>
-              <Card className="bg-card/95 backdrop-blur">
-                <CardHeader className="py-3">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="w-full justify-between"
-                    onClick={() => setUploadOpen((prev) => !prev)}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <PanelLeft className="h-4 w-4" />
-                      Upload
-                    </span>
-                    {uploadOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  </Button>
-                </CardHeader>
-                {uploadOpen ? <CardContent className="pt-0">{uploadPanel}</CardContent> : null}
-              </Card>
+          <Card className="bg-card/95 backdrop-blur">
+            <CardHeader className="py-3">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full justify-between"
+                onClick={() => setUploadOpen((prev) => !prev)}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <PanelLeft className="h-4 w-4" />
+                  Upload
+                </span>
+                {uploadOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </Button>
+            </CardHeader>
+            {uploadOpen ? <CardContent className="pt-0">{uploadPanel}</CardContent> : null}
+          </Card>
 
-              <Card className="bg-card/95 backdrop-blur">
-                <CardHeader className="py-3">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="w-full justify-between"
-                    onClick={() => setHistoryOpen((prev) => !prev)}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <History className="h-4 w-4" />
-                      History
-                    </span>
-                    {historyOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  </Button>
-                </CardHeader>
-                {historyOpen ? <CardContent className="pt-0">{historyPanel}</CardContent> : null}
-              </Card>
-
-              <Card className="bg-card/95 backdrop-blur">
-                <CardHeader className="py-3">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="w-full justify-between"
-                    onClick={() => setLayersOpen((prev) => !prev)}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <Layers3 className="h-4 w-4" />
-                      Layers
-                    </span>
-                    {layersOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  </Button>
-                </CardHeader>
-                {layersOpen ? <CardContent className="pt-0">{layersPanel}</CardContent> : null}
-              </Card>
-            </>
-          ) : null}
+          <Card className="bg-card/95 backdrop-blur">
+            <CardHeader className="py-3">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full justify-between"
+                onClick={() => setHistoryOpen((prev) => !prev)}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <History className="h-4 w-4" />
+                  History
+                </span>
+                {historyOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </Button>
+            </CardHeader>
+            {historyOpen ? <CardContent className="pt-0">{historyPanel}</CardContent> : null}
+          </Card>
         </aside>
       ) : null}
 
@@ -2686,10 +2630,10 @@ export function GlbViewer() {
           <div className="flex items-center justify-end gap-2">
             <Button
               size="sm"
-              variant={viewMode === "edit" ? "default" : "secondary"}
-              onClick={enterEditMode}
+              variant={viewMode === "navigate" ? "default" : "secondary"}
+              onClick={enterNavigateMode}
             >
-              Orbit
+              Navigate
             </Button>
             <Button
               size="sm"
@@ -3150,6 +3094,11 @@ export function GlbViewer() {
                                     ? undefined
                                     : { backgroundColor: `rgba(100, 116, 139, ${getDepthShade(row.layer.depth)})` }
                                 }
+                                onContextMenu={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  setLayerContextMenu({ layerId: row.layer.id, x: event.clientX, y: event.clientY });
+                                }}
                               >
                                 {row.layer.hasChildren ? (
                                   <Button
@@ -3458,6 +3407,16 @@ export function GlbViewer() {
             }}
           >
             Duplicate layer
+          </button>
+          <button
+            type="button"
+            className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-accent"
+            onClick={() => {
+              deleteLayer(layerContextMenu.layerId);
+              setLayerContextMenu(null);
+            }}
+          >
+            Delete layer
           </button>
         </div>
       ) : null}
