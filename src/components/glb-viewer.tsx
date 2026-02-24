@@ -1683,6 +1683,7 @@ export function GlbViewer() {
   };
 
   const enterNavigateMode = () => {
+    if (viewMode === "navigate") return; // already here — don't re-capture or reset
     // Capture the camera exactly as the user sees it now — Bounds fly-in is long done at this point
     const controls = orbitControlsRef.current;
     const camera = cameraRef.current;
@@ -2666,7 +2667,7 @@ export function GlbViewer() {
                   setHasMovedInNavigate(false);
                 }}
               >
-                Set Animate View
+                Pin View
               </Button>
             ) : null}
             <Button
