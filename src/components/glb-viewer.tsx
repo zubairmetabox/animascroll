@@ -2644,6 +2644,26 @@ export function GlbViewer() {
       {hasModel ? (
         <aside className="absolute right-4 top-4 z-40 w-full max-w-md space-y-2">
           <div className="flex items-center justify-end gap-2">
+            {viewMode === "navigate" ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-primary/50 text-primary hover:bg-primary/10"
+                onClick={() => {
+                  const controls = orbitControlsRef.current;
+                  const camera = cameraRef.current;
+                  if (!controls || !camera) return;
+                  defaultCameraViewRef.current = {
+                    position: [camera.position.x, camera.position.y, camera.position.z],
+                    target: [controls.target.x, controls.target.y, controls.target.z],
+                    fov: camera.fov,
+                    zoom: camera.zoom,
+                  };
+                }}
+              >
+                Set Animate View
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant={viewMode === "navigate" ? "default" : "secondary"}
