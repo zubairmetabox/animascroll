@@ -3381,7 +3381,7 @@ export function GlbViewer() {
       {/* ── Floating menu buttons — only after a model is loaded, not in preview ─── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className="absolute left-4 top-3 z-50 flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          className="absolute left-4 top-3 z-[60] flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
           {/* File menu */}
