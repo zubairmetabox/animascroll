@@ -348,14 +348,53 @@ window.addEventListener('scroll', onScroll, { passive: true });
 window.addEventListener('resize', onScroll);
 
 const objMap = {};
+
+// Per-object rotation pivot: bounding-box centre + base state, captured once on
+// first rotation call so the object spins around its visual centre (not its
+// potentially offset local origin) without accumulating position drift.
+const pivotMap = {};
+function getOrCapturePivot(obj) {
+  if (pivotMap[obj.name]) return pivotMap[obj.name];
+  const bbox = new THREE.Box3().setFromObject(obj);
+  if (bbox.isEmpty()) return null;
+  const centerWorld = new THREE.Vector3();
+  bbox.getCenter(centerWorld);
+  const centerLocal = obj.parent
+    ? obj.parent.worldToLocal(centerWorld.clone())
+    : centerWorld.clone();
+  pivotMap[obj.name] = {
+    centerLocal,
+    basePos: obj.position.clone(),
+    baseQuat: obj.quaternion.clone(),
+  };
+  return pivotMap[obj.name];
+}
+
 function applyValue(obj, propertyId, value) {
   switch (propertyId) {
     case 'position.x': obj.position.x = value; break;
     case 'position.y': obj.position.y = value; break;
     case 'position.z': obj.position.z = value; break;
-    case 'rotation.x': obj.rotation.x = THREE.MathUtils.degToRad(value); break;
-    case 'rotation.y': obj.rotation.y = THREE.MathUtils.degToRad(value); break;
-    case 'rotation.z': obj.rotation.z = THREE.MathUtils.degToRad(value); break;
+    case 'rotation.x':
+    case 'rotation.y':
+    case 'rotation.z': {
+      const axis = propertyId.split('.')[1];
+      const rad = THREE.MathUtils.degToRad(value);
+      const newRotX = axis === 'x' ? rad : obj.rotation.x;
+      const newRotY = axis === 'y' ? rad : obj.rotation.y;
+      const newRotZ = axis === 'z' ? rad : obj.rotation.z;
+      const pivot = getOrCapturePivot(obj);
+      if (pivot) {
+        const newQuat = new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(newRotX, newRotY, newRotZ, obj.rotation.order)
+        );
+        const deltaQuat = newQuat.clone().multiply(pivot.baseQuat.clone().invert());
+        const V = new THREE.Vector3().subVectors(pivot.centerLocal, pivot.basePos);
+        obj.position.subVectors(pivot.centerLocal, V.clone().applyQuaternion(deltaQuat));
+      }
+      obj.rotation.set(newRotX, newRotY, newRotZ, obj.rotation.order);
+      break;
+    }
     case 'scale.uniform': obj.scale.setScalar(value); break;
     case 'opacity':
       obj.traverse(function(child) {
