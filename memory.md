@@ -108,3 +108,71 @@
 2. Add import/export to JSON file (not just clipboard/localStorage).
 3. Add light gizmos and optional HDRI environment presets.
 4. Add unit tests for config parser and clamp/sanitize logic.
+
+---
+
+## 2026-02 Latest State (Animate Branch Handoff)
+
+### Branch / Scope
+- Active branch: `codex/animate`
+- Product direction shifted from pure viewer editor to scroll-driven animation authoring.
+
+### Completed Since Initial Build
+- Left sidebar reorganized with persistent undo/redo/reset and accordion sections.
+- Layer workflows expanded:
+  - visibility toggle
+  - rename on double click
+  - delete layer
+  - duplicate layer (offset for visibility)
+  - collapse/expand groups
+  - per-layer transform controls (position, rotation, uniform scale, opacity)
+- History workflow added:
+  - Photoshop-style timeline of edits
+  - jump to specific state
+  - forward states grayed out until new edit truncates branch
+  - keyboard shortcuts: `Ctrl/Cmd+Z`, `Ctrl/Cmd+Y`
+  - delete layer is undoable
+- Unsaved changes flow improved:
+  - prompt on tab close when dirty
+  - export marks state as saved
+
+### Controls/UX Refinements
+- Removed unused controls per product decisions:
+  - fog controls
+  - grid size/distance/fade controls
+  - camera FOV
+  - orbit smoothing
+  - pan toggle
+- Customize pane converted to accordion on right side.
+- Layer tree hierarchy improved with:
+  - depth-based background tinting
+  - visible indent guide lines
+  - lighter modifier-pane styling to differentiate from actual layers.
+
+### Scroll Animation Progress (Plan Alignment)
+- Phase 1 complete:
+  - mode toggle `Orbit` / `Animate`
+  - orbit editing in Orbit mode
+  - fixed camera contract in Animate mode
+- Phase 2 complete:
+  - full-width, AE-inspired timeline
+  - layer rows merged with timeline lanes
+  - vh ruler markers
+  - timeline zoom + vertical resize
+- Phase 3 complete:
+  - keyframe track data model
+  - clock toggle enables/disables animation per modifier
+  - add/overwrite keyframe at current seek
+  - previous/next keyframe navigation
+  - seek line + draggable seek handle
+
+### Latest Bug + Fix
+- Issue: property row UI broke when clock-enabled controls (prev/diamond/next) appeared.
+- Fix:
+  - refactored modifier row layout with fixed-width control cluster
+  - ensured label area truncates safely with `min-w-0`
+  - tightened icon/button sizing and numeric input width
+  - prevented overlap/collision in compact rows.
+
+### Known Next Target
+- Phase 4: tighten track rendering/interaction polish from real keyframe data and continue toward preview/runtime playback.
