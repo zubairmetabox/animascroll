@@ -947,6 +947,15 @@ export function GlbViewer() {
   timelineCurrentVhRef.current = timelineCurrentVh;
   dragOverInfoRef.current = dragOverInfo;
 
+  // Per-layer rotation pivot: bounding-box center + base position captured once at
+  // the start of timeline animation. Used to spin objects around their visual centre
+  // without accumulating position drift across frames.
+  const rotationPivotRef = useRef<Map<string, {
+    centerLocal: THREE.Vector3;
+    basePos: THREE.Vector3;
+    baseQuat: THREE.Quaternion;
+  }>>(new Map());
+
   const togglePlayRef = useRef<() => void>(() => {});
   togglePlayRef.current = () => {
     if (isPlaying) {
@@ -1615,16 +1624,48 @@ export function GlbViewer() {
       case "rotation.x":
       case "rotation.y":
       case "rotation.z": {
-        // Set euler angle directly — no position compensation here.
-        // setObjectRotationFromCenter adjusts position to keep the visual
-        // center fixed, which is correct for one-shot interactive edits but
-        // causes cumulative drift when called every scrub frame.
         const rotObj = layerObjectMapRef.current.get(layer.id);
         if (!rotObj) return;
         const rotVal = Number(rawValue);
         if (Number.isNaN(rotVal)) return;
+        // Lazily capture the bounding-box centre (in parent-local space) and the
+        // object's base position/quaternion on the very first rotation call per
+        // layer per session. All subsequent calls reuse this fixed pivot so the
+        // position correction is deterministic and drift-free.
+        if (!rotationPivotRef.current.has(layer.id)) {
+          const bbox = new THREE.Box3().setFromObject(rotObj);
+          if (!bbox.isEmpty()) {
+            const centerWorld = new THREE.Vector3();
+            bbox.getCenter(centerWorld);
+            const centerLocal = rotObj.parent
+              ? rotObj.parent.worldToLocal(centerWorld.clone())
+              : centerWorld.clone();
+            rotationPivotRef.current.set(layer.id, {
+              centerLocal,
+              basePos: rotObj.position.clone(),
+              baseQuat: rotObj.quaternion.clone(),
+            });
+          }
+        }
         const rotAxis = propertyId.split(".")[1] as "x" | "y" | "z";
-        rotObj.rotation[rotAxis] = THREE.MathUtils.degToRad(rotVal);
+        const newRotX = rotAxis === "x" ? THREE.MathUtils.degToRad(rotVal) : rotObj.rotation.x;
+        const newRotY = rotAxis === "y" ? THREE.MathUtils.degToRad(rotVal) : rotObj.rotation.y;
+        const newRotZ = rotAxis === "z" ? THREE.MathUtils.degToRad(rotVal) : rotObj.rotation.z;
+        const pivotData = rotationPivotRef.current.get(layer.id);
+        if (pivotData) {
+          // Build the rotation delta from base to target, then rotate the
+          // (origin → center) offset vector by that delta and subtract from the
+          // fixed centre to get the new origin position.  This spins the object
+          // around its visual centre without touching any other state.
+          const newQuat = new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(newRotX, newRotY, newRotZ, rotObj.rotation.order)
+          );
+          const deltaQuat = newQuat.clone().multiply(pivotData.baseQuat.clone().invert());
+          const V = new THREE.Vector3().subVectors(pivotData.centerLocal, pivotData.basePos);
+          const rotatedV = V.clone().applyQuaternion(deltaQuat);
+          rotObj.position.subVectors(pivotData.centerLocal, rotatedV);
+        }
+        rotObj.rotation.set(newRotX, newRotY, newRotZ, rotObj.rotation.order);
         syncLayerTransform(layer.id);
         return;
       }
@@ -1785,6 +1826,7 @@ export function GlbViewer() {
         (gltf) => {
           if (loadId !== loadIdRef.current) return;
           setModelScene(gltf.scene);
+          rotationPivotRef.current.clear();
           const { items, objectMap } = getLayerItems(gltf.scene);
           setLayerItems(items);
           layerObjectMapRef.current = objectMap;
