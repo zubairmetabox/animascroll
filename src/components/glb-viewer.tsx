@@ -498,8 +498,7 @@ function MoveGizmo({
   onDragMove: () => void;
   onDragEnd: () => void;
 }) {
-  const controlsRef = useRef<any>(null);
-  // Keep callbacks in refs so addEventListener closures are always fresh
+  // Keep callbacks in refs so R3F prop closures are always fresh
   const startRef = useRef(onDragStart);
   const moveRef  = useRef(onDragMove);
   const endRef   = useRef(onDragEnd);
@@ -507,29 +506,15 @@ function MoveGizmo({
   moveRef.current  = onDragMove;
   endRef.current   = onDragEnd;
 
-  useEffect(() => {
-    const controls = controlsRef.current;
-    if (!controls || !object) return;
-    const handleChange    = () => moveRef.current();
-    const handleMouseDown = () => startRef.current();
-    const handleMouseUp   = () => endRef.current();
-    controls.addEventListener("change",    handleChange);
-    controls.addEventListener("mouseDown", handleMouseDown);
-    controls.addEventListener("mouseUp",   handleMouseUp);
-    return () => {
-      controls.removeEventListener("change",    handleChange);
-      controls.removeEventListener("mouseDown", handleMouseDown);
-      controls.removeEventListener("mouseUp",   handleMouseUp);
-    };
-  }, [object]);
-
   if (!object) return null;
 
   return (
     <TransformControls
-      ref={controlsRef}
       object={object}
       mode="translate"
+      onMouseDown={() => startRef.current()}
+      onChange={() => moveRef.current()}
+      onMouseUp={() => endRef.current()}
     />
   );
 }
@@ -3615,12 +3600,12 @@ export function GlbViewer() {
               <div className="mx-1 h-4 w-px bg-border/60" />
               <button
                 type="button"
-                title="Move tool (G)"
+                title={moveToolActive ? "Move tool active — click or press G to deactivate" : "Move tool (G)"}
                 className={cn(
-                  "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm font-medium transition-colors",
+                  "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-sm font-medium transition-colors",
                   moveToolActive
-                    ? "bg-primary text-primary-foreground"
-                    : "hover:bg-muted/80 text-muted-foreground hover:text-foreground"
+                    ? "border-primary bg-primary/15 text-primary"
+                    : "border-transparent text-muted-foreground hover:border-border/50 hover:bg-muted/60 hover:text-foreground"
                 )}
                 onClick={() => setMoveToolActive((v) => !v)}
               >
