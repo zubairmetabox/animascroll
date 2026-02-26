@@ -18,10 +18,10 @@ import {
   Code2,
   Download,
   Diamond,
+  FolderOpen,
   Globe2,
   History,
   Lightbulb,
-  PanelLeft,
   Pause,
   Play,
   Plus,
@@ -77,6 +77,9 @@ type PointLightConfig = {
 type ConfigPayload = {
   settings: ViewerSettings;
   pointLights: PointLightConfig[];
+  pinnedCameraView?: CameraView;
+  timelineLengthVh?: number;
+  animationTracks?: AnimationTrack[];
 };
 
 type LayerItem = {
@@ -111,20 +114,25 @@ type HistoryEntry = {
   id: string;
   label: string;
   snapshot: LayerSnapshot;
+  tracks: AnimationTrack[];
 };
+
+type EasingType = "linear" | "easeIn" | "easeOut" | "easeInOut" | "easeInOutCubic";
 
 type AnimationKeyframe = {
   atVh: number;
   value: number;
+  easing?: EasingType;
 };
 
 type AnimationTrack = {
   layerId: string;
+  layerName?: string; // saved for remapping when UUIDs differ on re-upload
   propertyId: string;
   keyframes: AnimationKeyframe[];
 };
 
-type ViewMode = "navigate" | "animate";
+type ViewMode = "navigate" | "animate" | "preview";
 
 type CameraView = {
   position: [number, number, number];
@@ -210,6 +218,17 @@ function readFileBuffer(file: File): Promise<ArrayBuffer> {
 
     readWithFileReader();
   });
+}
+
+function applyEasing(t: number, easing: EasingType = "linear"): number {
+  switch (easing) {
+    case "easeIn":    return t * t;
+    case "easeOut":   return t * (2 - t);
+    case "easeInOut": return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+    case "easeInOutCubic":
+      return t < 0.5 ? 4 * t * t * t : (t - 1) * (2 * t - 2) * (2 * t - 2) + 1;
+    default:          return t; // linear
+  }
 }
 
 function disposeScene(scene: THREE.Object3D) {
@@ -649,6 +668,7 @@ export function GlbViewer() {
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("animate");
+  const [pinnedCameraView, setPinnedCameraView] = useState<CameraView | null>(null);
   const [timelineLengthVh, setTimelineLengthVh] = useState(200);
   const [timelineCurrentVh, setTimelineCurrentVh] = useState(0);
   const [timelineProgress, setTimelineProgress] = useState(0);
@@ -659,16 +679,25 @@ export function GlbViewer() {
   const [timelinePanelHeight, setTimelinePanelHeight] = useState(260);
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
   const [selectedKfIds, setSelectedKfIds] = useState<Set<string>>(new Set());
-  const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number } | null>(null);
+  const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number; top: number; bottom: number; startX: number; endX: number } | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
-  const [uploadOpen, setUploadOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const [editMenuOpen, setEditMenuOpen] = useState(false);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const [pendingSaveAction, setPendingSaveAction] = useState<(() => void) | null>(null);
   const [settings, setSettings] = useState<ViewerSettings>(DEFAULT_SETTINGS);
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
   const [layerItems, setLayerItems] = useState<LayerItem[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [layerContextMenu, setLayerContextMenu] = useState<{
     layerId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [kfContextMenu, setKfContextMenu] = useState<{
+    kfIds: Set<string>;
     x: number;
     y: number;
   } | null>(null);
@@ -683,8 +712,11 @@ export function GlbViewer() {
   const [configDirty, setConfigDirty] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [historyIndex, setHistoryIndex] = useState(0);
+  const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(new Set());
+  const [dragOverInfo, setDragOverInfo] = useState<{ targetId: string; position: "before" | "after" } | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const loadIdRef = useRef(0);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -698,7 +730,12 @@ export function GlbViewer() {
   const pendingRotationLayerIdsRef = useRef<Set<string>>(new Set());
   const undoActionRef = useRef<() => void>(() => {});
   const redoActionRef = useRef<() => void>(() => {});
-  const defaultCameraViewRef = useRef<{ position: [number,number,number]; target: [number,number,number]; fov: number; zoom: number } | null>(null);
+  const dragLayerIdRef = useRef<string | null>(null);
+  const layerDragStartRef = useRef<{ layerId: string; startX: number; startY: number } | null>(null);
+  const modifierInputTypingRef = useRef(false);
+  const dragOverInfoRef = useRef<{ targetId: string; position: "before" | "after" } | null>(null);
+  const reorderLayerRef = useRef<(draggedId: string, targetId: string, insertBefore: boolean) => void>(() => {});
+  // pinnedCameraView is kept in state (see useState above) so the config effect re-runs on changes
   const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const timelineSeekDragRef = useRef(false);
   const timelineRulerRef = useRef<HTMLDivElement | null>(null);
@@ -712,6 +749,10 @@ export function GlbViewer() {
   const commitTimelinePropertyEditRef = useRef<
     (layer: LayerItem, propertyId: string) => void
   >(() => {});
+  const upsertKeyframeAtCurrentTimeRef = useRef<
+    (layer: LayerItem, propertyId: string, pushToHistory?: boolean) => void
+  >(() => {});
+  const lastUpsertTracksRef = useRef<AnimationTrack[]>([]);
   const timelineModifierDragRef = useRef<{
     layerId: string;
     propertyId: string;
@@ -720,20 +761,23 @@ export function GlbViewer() {
   } | null>(null);
   const snapKeyframeVhRef = useRef<(rawVh: number, shiftKey: boolean) => number>((v) => v);
   const layerItemsRef = useRef<LayerItem[]>([]);
-  const clipboardKfsRef = useRef<{ layerId: string; propertyId: string; relVh: number; value: number }[]>([]);
+  const clipboardKfsRef = useRef<{ layerId: string; propertyId: string; relVh: number; value: number; easing?: EasingType }[]>([]);
   const retimeDragRef = useRef<{
     startX: number;
     snapshot: { id: string; layerId: string; propertyId: string; origAtVh: number }[];
+    baselineTracks: AnimationTrack[];
+    latestTracks: AnimationTrack[];
   } | null>(null);
-  const rubberBandRef = useRef<{ startVh: number; startX: number } | null>(null);
+  const rubberBandRef = useRef<{ startVh: number; startX: number; startY: number } | null>(null);
   const animationTracksRef = useRef<AnimationTrack[]>([]);
   const timelineZoomRef = useRef(1);
-  const rubberBandVhRef = useRef<{ a: number; b: number } | null>(null);
+  const rubberBandVhRef = useRef<{ a: number; b: number; top: number; bottom: number } | null>(null);
   layerItemsRef.current = layerItems;
   animationTracksRef.current = animationTracks;
   timelineZoomRef.current = timelineZoom;
   rubberBandVhRef.current = rubberBandVh;
   timelineCurrentVhRef.current = timelineCurrentVh;
+  dragOverInfoRef.current = dragOverInfo;
 
   const togglePlayRef = useRef<() => void>(() => {});
   togglePlayRef.current = () => {
@@ -755,9 +799,12 @@ export function GlbViewer() {
 
   useEffect(() => {
     if (configDirty) return;
-    const text = JSON.stringify({ settings, pointLights }, null, 2);
-    setConfigText(text);
-  }, [settings, pointLights, configDirty]);
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) payload.animationTracks = animationTracks;
+    setConfigText(JSON.stringify(payload, null, 2));
+  }, [settings, pointLights, pinnedCameraView, timelineLengthVh, animationTracks, configDirty]);
 
   useEffect(() => {
     deletedLayerIdsRef.current = deletedLayerIds;
@@ -792,6 +839,37 @@ export function GlbViewer() {
     };
   }, [timelineLengthVh, viewMode]);
 
+  // Preview mode: extend body height and drive timeline from window scroll
+  useEffect(() => {
+    if (viewMode !== "preview") return;
+
+    // Body height = timeline length + one extra viewport so the final frame is reachable
+    const prevBodyHeight = document.body.style.height;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.height = `${timelineLengthVh + 100}vh`;
+    document.documentElement.style.overflow = "auto";
+
+    const onScroll = () => {
+      const maxScroll = (timelineLengthVh / 100) * window.innerHeight;
+      const raw = (window.scrollY / Math.max(1, maxScroll)) * timelineLengthVh;
+      const clamped = Math.min(Math.max(raw, 0), timelineLengthVh);
+      setTimelineCurrentVh(Number(clamped.toFixed(2)));
+      setTimelineProgress(clamped / timelineLengthVh);
+    };
+
+    window.scrollTo(0, 0);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      document.body.style.height = prevBodyHeight;
+      document.documentElement.style.overflow = prevHtmlOverflow;
+      window.scrollTo(0, 0);
+    };
+  }, [viewMode, timelineLengthVh]);
+
   const commitHistoryState = (entries: HistoryEntry[], index: number) => {
     historyEntriesRef.current = entries;
     historyIndexRef.current = index;
@@ -805,6 +883,15 @@ export function GlbViewer() {
     const object = layerObjectMapRef.current.get(layerId);
     return object?.name?.trim() || "Layer";
   };
+
+  // Re-apply pinned camera view in animate mode whenever it changes (e.g. after JSON load).
+  // Using requestAnimationFrame ensures we run after Bounds' fit animation frame.
+  useEffect(() => {
+    if (!hasModel || !pinnedCameraView || viewMode !== "animate") return;
+    const id = requestAnimationFrame(() => applyCameraView(pinnedCameraView));
+    return () => cancelAnimationFrame(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedCameraView, hasModel, viewMode]);
 
   useEffect(() => {
     if (!hasUnsavedChanges) return;
@@ -828,6 +915,24 @@ export function GlbViewer() {
   }, [layerContextMenu]);
 
   useEffect(() => {
+    if (!kfContextMenu) return;
+    const closeMenu = () => setKfContextMenu(null);
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [kfContextMenu]);
+
+  useEffect(() => {
+    if (!fileMenuOpen && !editMenuOpen) return;
+    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [fileMenuOpen, editMenuOpen]);
+
+  useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return;
@@ -839,6 +944,15 @@ export function GlbViewer() {
     window.addEventListener("pointerdown", onPointerDown);
     return () => window.removeEventListener("pointerdown", onPointerDown);
   }, []);
+
+  useEffect(() => {
+    if (rubberBandVh) {
+      document.body.style.userSelect = "none";
+    } else {
+      document.body.style.userSelect = "";
+    }
+    return () => { document.body.style.userSelect = ""; };
+  }, [rubberBandVh]);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
@@ -854,49 +968,111 @@ export function GlbViewer() {
         const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
         if (!layer) return;
         const deltaX = event.clientX - modifierDrag.startX;
-        const step = modifierDrag.propertyId.startsWith("rotation.") ? 1 : 0.01;
-        const nextRaw = modifierDrag.startValue + Math.round(deltaX / 8) * step;
-        const decimals = modifierDrag.propertyId.startsWith("rotation.") ? 2 : 3;
+        let nextRaw: number;
+        let decimals: number;
+        if (modifierDrag.propertyId.startsWith("rotation.")) {
+          nextRaw = modifierDrag.startValue + Math.round(deltaX / 8);
+          decimals = 2;
+        } else if (modifierDrag.propertyId.startsWith("position.")) {
+          nextRaw = modifierDrag.startValue + deltaX * 0.001;
+          decimals = 4;
+        } else {
+          nextRaw = modifierDrag.startValue + Math.round(deltaX / 8) * 0.01;
+          decimals = 3;
+        }
         applyTimelinePropertyValueRef.current(layer, modifierDrag.propertyId, nextRaw.toFixed(decimals));
+        upsertKeyframeAtCurrentTimeRef.current(layer, modifierDrag.propertyId);
       }
 
       // Retime drag — move selected keyframes horizontally
       if (retimeDragRef.current) {
-        const { startX, snapshot } = retimeDragRef.current;
+        const { startX, snapshot, baselineTracks } = retimeDragRef.current;
         const dx = event.clientX - startX;
         const trackWidth = Math.max(1200, timelineLengthVh * 3) * timelineZoomRef.current;
         const deltaVh = (dx / trackWidth) * timelineLengthVh;
-        setAnimationTracks((prev) => {
-          const next = [...prev];
-          for (const s of snapshot) {
-            const idx = next.findIndex((t) => t.layerId === s.layerId && t.propertyId === s.propertyId);
-            if (idx < 0) continue;
-            const newAtVh = Number(THREE.MathUtils.clamp(s.origAtVh + deltaVh, 0, timelineLengthVh).toFixed(2));
-            const kfs = next[idx].keyframes.map((kf) =>
-              Number(kf.atVh.toFixed(2)) === Number(s.origAtVh.toFixed(2)) ? { ...kf, atVh: newAtVh } : kf
-            );
-            kfs.sort((a, b) => a.atVh - b.atVh);
-            next[idx] = { ...next[idx], keyframes: kfs };
-          }
-          return next;
+        // Build lookup: "layerId::propertyId::origAtVh" -> newAtVh
+        const movedMap = new Map<string, number>();
+        for (const s of snapshot) {
+          const newAtVh = Number(THREE.MathUtils.clamp(s.origAtVh + deltaVh, 0, timelineLengthVh).toFixed(2));
+          movedMap.set(`${s.layerId}::${s.propertyId}::${s.origAtVh.toFixed(2)}`, newAtVh);
+        }
+        // Rebuild tracks from baseline so the match is always against origAtVh
+        const retimeTracks = baselineTracks.map((baseTrack) => {
+          const hasAny = snapshot.some(
+            (s) => s.layerId === baseTrack.layerId && s.propertyId === baseTrack.propertyId
+          );
+          if (!hasAny) return baseTrack;
+          const kfs = baseTrack.keyframes.map((kf) => {
+            const key = `${baseTrack.layerId}::${baseTrack.propertyId}::${kf.atVh.toFixed(2)}`;
+            const newAtVh = movedMap.get(key);
+            return newAtVh !== undefined ? { ...kf, atVh: newAtVh } : kf;
+          });
+          kfs.sort((a, b) => a.atVh - b.atVh);
+          return { ...baseTrack, keyframes: kfs };
         });
-        setSelectedKfIds(new Set(
-          snapshot.map((s) => {
-            const newAtVh = Number(THREE.MathUtils.clamp(s.origAtVh + deltaVh, 0, timelineLengthVh).toFixed(2));
-            return makeKfId(s.layerId, s.propertyId, newAtVh);
-          })
-        ));
+        retimeDragRef.current.latestTracks = retimeTracks;
+        setAnimationTracks(retimeTracks);
+        setSelectedKfIds(
+          new Set(
+            snapshot.map((s) => {
+              const newAtVh = Number(
+                THREE.MathUtils.clamp(s.origAtVh + deltaVh, 0, timelineLengthVh).toFixed(2)
+              );
+              return makeKfId(s.layerId, s.propertyId, newAtVh);
+            })
+          )
+        );
         return; // don't seek while retiming
+      }
+
+      // Layer drag — find drop target via elementsFromPoint
+      if (layerDragStartRef.current) {
+        const { layerId, startX, startY } = layerDragStartRef.current;
+        if (Math.abs(event.clientX - startX) > 5 || Math.abs(event.clientY - startY) > 5) {
+          dragLayerIdRef.current = layerId;
+        }
+      }
+      if (dragLayerIdRef.current) {
+        const els = document.elementsFromPoint(event.clientX, event.clientY);
+        const rowEl = els.find((el) => el instanceof HTMLElement && el.dataset.layerId) as HTMLElement | undefined;
+        const targetId = rowEl?.dataset.layerId ?? null;
+        if (targetId && targetId !== dragLayerIdRef.current) {
+          const draggedItem = layerItemsRef.current.find((l) => l.id === dragLayerIdRef.current);
+          const targetItem = layerItemsRef.current.find((l) => l.id === targetId);
+          if (draggedItem && targetItem && draggedItem.parentId === targetItem.parentId) {
+            const rect = rowEl!.getBoundingClientRect();
+            const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+            setDragOverInfo((prev) =>
+              prev?.targetId === targetId && prev.position === position
+                ? prev
+                : { targetId, position }
+            );
+          } else {
+            setDragOverInfo(null);
+          }
+        } else if (!targetId) {
+          setDragOverInfo(null);
+        }
+        return;
       }
 
       // Rubber-band selection update
       if (rubberBandRef.current && timelineRulerRef.current) {
-        if (Math.abs(event.clientX - rubberBandRef.current.startX) > 5) {
+        const dxBand = Math.abs(event.clientX - rubberBandRef.current.startX);
+        const dyBand = Math.abs(event.clientY - rubberBandRef.current.startY);
+        if (dxBand > 5 || dyBand > 5) {
           timelineSeekDragRef.current = false; // stop seek when rubber-band kicks in
           const rect = timelineRulerRef.current.getBoundingClientRect();
           const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
           const currentVh = ratio * timelineLengthVh;
-          setRubberBandVh({ a: rubberBandRef.current.startVh, b: currentVh });
+          setRubberBandVh({
+            a: rubberBandRef.current.startVh,
+            b: currentVh,
+            top: Math.min(rubberBandRef.current.startY, event.clientY),
+            bottom: Math.max(rubberBandRef.current.startY, event.clientY),
+            startX: rubberBandRef.current.startX,
+            endX: event.clientX,
+          });
         }
       }
 
@@ -914,7 +1090,23 @@ export function GlbViewer() {
       timelineSeekDragRef.current = false;
 
       // Commit retime drag
+      const retimeLatest = retimeDragRef.current?.latestTracks ?? null;
+      const hadRetimeDrag = retimeDragRef.current !== null;
       retimeDragRef.current = null;
+      if (hadRetimeDrag && retimeLatest) {
+        pushHistory("Retime keyframe", retimeLatest);
+      }
+
+      // Commit layer drag
+      layerDragStartRef.current = null;
+      if (dragLayerIdRef.current) {
+        const info = dragOverInfoRef.current;
+        if (info) {
+          reorderLayerRef.current(dragLayerIdRef.current, info.targetId, info.position === "before");
+        }
+        dragLayerIdRef.current = null;
+        setDragOverInfo(null);
+      }
 
       // Commit rubber-band selection
       const wasRubberBand = rubberBandRef.current !== null;
@@ -924,8 +1116,29 @@ export function GlbViewer() {
         if (range) {
           const lo = Math.min(range.a, range.b);
           const hi = Math.max(range.a, range.b);
+          // Determine which tracks fall within the vertical range
+          const rowEls = document.querySelectorAll<HTMLElement>("[data-track-row-id], [data-track-layer-id]");
+          const validRowIds = new Set<string>();
+          for (const el of rowEls) {
+            const r = el.getBoundingClientRect();
+            if (r.bottom >= range.top && r.top <= range.bottom) {
+              if (el.dataset.trackRowId) {
+                // Property row — include just this track
+                validRowIds.add(el.dataset.trackRowId);
+              } else if (el.dataset.trackLayerId) {
+                // Layer header row — include all tracks for this layer
+                for (const track of animationTracksRef.current) {
+                  if (track.layerId === el.dataset.trackLayerId) {
+                    validRowIds.add(`${track.layerId}::${track.propertyId}`);
+                  }
+                }
+              }
+            }
+          }
           const newSel = new Set<string>();
           for (const track of animationTracksRef.current) {
+            const rowId = `${track.layerId}::${track.propertyId}`;
+            if (!validRowIds.has(rowId)) continue;
             for (const kf of track.keyframes) {
               if (kf.atVh >= lo && kf.atVh <= hi) {
                 newSel.add(makeKfId(track.layerId, track.propertyId, kf.atVh));
@@ -945,6 +1158,7 @@ export function GlbViewer() {
         const layer = layerItems.find((item) => item.id === modifierDrag.layerId);
         if (layer) {
           commitTimelinePropertyEditRef.current(layer, modifierDrag.propertyId);
+          pushHistory(`Edit: ${layer.name}`, lastUpsertTracksRef.current.length > 0 ? lastUpsertTracksRef.current : animationTracksRef.current);
         }
       }
       timelineModifierDragRef.current = null;
@@ -1049,7 +1263,8 @@ export function GlbViewer() {
     if (atVh >= kfs[kfs.length - 1].atVh) return kfs[kfs.length - 1].value;
     for (let i = 0; i < kfs.length - 1; i++) {
       if (kfs[i].atVh <= atVh && kfs[i + 1].atVh >= atVh) {
-        const t = (atVh - kfs[i].atVh) / Math.max(1e-9, kfs[i + 1].atVh - kfs[i].atVh);
+        const raw = (atVh - kfs[i].atVh) / Math.max(1e-9, kfs[i + 1].atVh - kfs[i].atVh);
+        const t = applyEasing(raw, kfs[i].easing ?? "linear");
         return kfs[i].value + t * (kfs[i + 1].value - kfs[i].value);
       }
     }
@@ -1076,30 +1291,32 @@ export function GlbViewer() {
   };
 
   const toggleTrackAnimation = (layer: LayerItem, propertyId: string, enabled: boolean) => {
-    setAnimationTracks((prev) => {
-      const index = prev.findIndex(
-        (track) => track.layerId === layer.id && track.propertyId === propertyId
-      );
-      if (!enabled) {
-        if (index < 0) return prev;
-        return prev.filter((_, i) => i !== index);
-      }
-
+    const prev = animationTracksRef.current;
+    const index = prev.findIndex(
+      (track) => track.layerId === layer.id && track.propertyId === propertyId
+    );
+    let newTracks: AnimationTrack[];
+    if (!enabled) {
+      if (index < 0) return;
+      newTracks = prev.filter((_, i) => i !== index);
+    } else {
       const atVh = Number(timelineCurrentVh.toFixed(2));
       const value = Number(getTimelinePropertyValue(layer, propertyId).toFixed(4));
       if (index < 0) {
-        return [...prev, { layerId: layer.id, propertyId, keyframes: [{ atVh, value }] }];
+        newTracks = [...prev, { layerId: layer.id, propertyId, keyframes: [{ atVh, value }] }];
+      } else {
+        const next = [...prev];
+        const keyframes = [...next[index].keyframes];
+        const existing = keyframes.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
+        if (existing >= 0) keyframes[existing] = { ...keyframes[existing], value }; // preserve easing
+        else keyframes.push({ atVh, value });
+        keyframes.sort((a, b) => a.atVh - b.atVh);
+        next[index] = { ...next[index], keyframes };
+        newTracks = next;
       }
-      const next = [...prev];
-      const keyframes = [...next[index].keyframes];
-      const existing = keyframes.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
-      if (existing >= 0) keyframes[existing] = { atVh, value };
-      else keyframes.push({ atVh, value });
-      keyframes.sort((a, b) => a.atVh - b.atVh);
-      next[index] = { ...next[index], keyframes };
-      return next;
-    });
-    setHasUnsavedChanges(true);
+    }
+    setAnimationTracks(newTracks);
+    pushHistory(enabled ? "Enable animation" : "Disable animation", newTracks);
   };
 
   const navigateTrackKeyframe = (
@@ -1121,7 +1338,20 @@ export function GlbViewer() {
     setTimelineSeekVh(target.atVh);
   };
 
-  const upsertKeyframeAtCurrentTime = (layer: LayerItem, propertyId: string) => {
+  const setKeyframeEasing = (kfIds: Set<string>, easing: EasingType) => {
+    const prev = animationTracksRef.current;
+    const newTracks = prev.map((track) => {
+      const updated = track.keyframes.map((kf) => {
+        const id = makeKfId(track.layerId, track.propertyId, kf.atVh);
+        return kfIds.has(id) ? { ...kf, easing } : kf;
+      });
+      return { ...track, keyframes: updated };
+    });
+    setAnimationTracks(newTracks);
+    pushHistory("Set easing", newTracks);
+  };
+
+  const upsertKeyframeAtCurrentTime = (layer: LayerItem, propertyId: string, doHistory = false) => {
     const atVh = Number(timelineCurrentVh.toFixed(2));
     // Read from the live Three.js object so we never get stale React state
     const liveObject = layerObjectMapRef.current.get(layer.id);
@@ -1142,32 +1372,30 @@ export function GlbViewer() {
       rawValue = getTimelinePropertyValue(layer, propertyId);
     }
     const value = Number(rawValue.toFixed(4));
-    setAnimationTracks((prev) => {
-      const next = [...prev];
-      const index = next.findIndex(
-        (track) => track.layerId === layer.id && track.propertyId === propertyId
-      );
-      if (index < 0) {
-        next.push({
-          layerId: layer.id,
-          propertyId,
-          keyframes: [{ atVh, value }],
-        });
-        return next;
-      }
-
+    const prev = animationTracksRef.current;
+    const next = [...prev];
+    const index = next.findIndex(
+      (track) => track.layerId === layer.id && track.propertyId === propertyId
+    );
+    if (index < 0) {
+      next.push({ layerId: layer.id, propertyId, keyframes: [{ atVh, value }] });
+    } else {
       const keyframes = [...next[index].keyframes];
       const existing = keyframes.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
       if (existing >= 0) {
-        keyframes[existing] = { atVh, value };
+        keyframes[existing] = { ...keyframes[existing], value }; // preserve easing
       } else {
         keyframes.push({ atVh, value });
       }
       keyframes.sort((a, b) => a.atVh - b.atVh);
       next[index] = { ...next[index], keyframes };
-      return next;
-    });
+    }
+    lastUpsertTracksRef.current = next;
+    setAnimationTracks(next);
     setHasUnsavedChanges(true);
+    if (doHistory) {
+      pushHistory("Set keyframe", next);
+    }
   };
 
   const getDepthShade = (depth: number) => {
@@ -1201,7 +1429,8 @@ export function GlbViewer() {
   const getTimelinePropertyStep = (propertyId: string) => {
     if (propertyId.startsWith("rotation.")) return "1";
     if (propertyId === "opacity") return "0.01";
-    return "0.01";
+    if (propertyId.startsWith("position.")) return "0.001";
+    return "0.001";
   };
 
   const applyTimelinePropertyValue = (layer: LayerItem, propertyId: string, rawValue: string) => {
@@ -1257,6 +1486,7 @@ export function GlbViewer() {
   useEffect(() => {
     applyTimelinePropertyValueRef.current = applyTimelinePropertyValue;
     commitTimelinePropertyEditRef.current = commitTimelinePropertyEdit;
+    upsertKeyframeAtCurrentTimeRef.current = upsertKeyframeAtCurrentTime;
   });
 
   useEffect(() => {
@@ -1391,7 +1621,7 @@ export function GlbViewer() {
           setCollapsedGroupIds(new Set());
           setTimelineExpandedLayerIds(new Set());
           setAnimationTracks([]);
-          defaultCameraViewRef.current = null;
+          setPinnedCameraView(null);
           setViewMode("animate");
           const emptyDeleted = new Set<string>();
           setDeletedLayerIds(emptyDeleted);
@@ -1427,6 +1657,7 @@ export function GlbViewer() {
                 id: `${Date.now()}-init`,
                 label: "Initial state",
                 snapshot: initialSnapshot,
+                tracks: [],
               },
             ],
             0
@@ -1435,7 +1666,7 @@ export function GlbViewer() {
           pendingScaleLayerIdsRef.current.clear();
           pendingRotationLayerIdsRef.current.clear();
           if (previousScene) disposeScene(previousScene);
-          setUploadOpen(false);
+          setUploadModalOpen(false);
           setIsLoading(false);
         },
         (error) => {
@@ -1493,9 +1724,9 @@ export function GlbViewer() {
     });
   };
 
-  const applyConfigFromText = () => {
+  const applyConfigPayload = (text: string): { ok: boolean; message: string } => {
     try {
-      const parsed = JSON.parse(configText) as ConfigPayload;
+      const parsed = JSON.parse(text) as ConfigPayload;
       if (!parsed || typeof parsed !== "object") throw new Error("Invalid JSON root.");
       if (!parsed.settings || !parsed.pointLights) throw new Error("JSON requires settings and pointLights.");
 
@@ -1506,11 +1737,103 @@ export function GlbViewer() {
 
       setSettings(mergedSettings);
       setPointLights(mergedLights.length > 0 ? mergedLights : [createDefaultPointLight(0)]);
-      setConfigDirty(false);
+
+      // Animation data — backward compat: fields are optional
+      if (parsed.pinnedCameraView && typeof parsed.pinnedCameraView === "object") {
+        const cv = parsed.pinnedCameraView;
+        const view: CameraView = {
+          position: Array.isArray(cv.position) ? cv.position as [number, number, number] : DEFAULT_CAMERA_VIEW.position,
+          target:   Array.isArray(cv.target)   ? cv.target   as [number, number, number] : DEFAULT_CAMERA_VIEW.target,
+          fov:   typeof cv.fov  === "number" ? cv.fov  : DEFAULT_CAMERA_VIEW.fov,
+          zoom:  typeof cv.zoom === "number" ? cv.zoom : DEFAULT_CAMERA_VIEW.zoom,
+        };
+        setPinnedCameraView(view);
+        applyCameraView(view);
+      }
+
+      if (typeof parsed.timelineLengthVh === "number" && parsed.timelineLengthVh > 0) {
+        setTimelineLengthVh(parsed.timelineLengthVh);
+      }
+
+      if (Array.isArray(parsed.animationTracks)) {
+        const currentLayers = layerItemsRef.current;
+        const remapped = (parsed.animationTracks as AnimationTrack[]).map((track) => {
+          // If the UUID still exists in the scene, use as-is
+          if (currentLayers.some((l) => l.id === track.layerId)) return track;
+          // Otherwise try to match by saved layer name (handles re-upload with new UUIDs)
+          if (track.layerName) {
+            const match = currentLayers.find((l) => l.name === track.layerName);
+            if (match) return { ...track, layerId: match.id };
+          }
+          return track;
+        });
+        setAnimationTracks(remapped);
+      }
+
       setHasUnsavedChanges(true);
-      setConfigMessage("Config applied.");
+      return { ok: true, message: "Config applied." };
     } catch (error) {
-      setConfigMessage(`Invalid config: ${error instanceof Error ? error.message : "Unknown error"}`);
+      return { ok: false, message: `Invalid config: ${error instanceof Error ? error.message : "Unknown error"}` };
+    }
+  };
+
+  const applyConfigFromText = () => {
+    const result = applyConfigPayload(configText);
+    if (result.ok) setConfigDirty(false);
+    setConfigMessage(result.message);
+  };
+
+  const saveToFile = () => {
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) {
+      payload.animationTracks = animationTracks.map((track) => ({
+        ...track,
+        layerName: getLayerName(track.layerId),
+      }));
+    }
+    const text = JSON.stringify(payload, null, 2);
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `animation-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setHasUnsavedChanges(false);
+    setLayerMessage("Saved.");
+  };
+
+  const loadFromFile = () => jsonFileInputRef.current?.click();
+
+  const onJsonFilePick = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = "";
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === "string" ? reader.result : "";
+      const result = applyConfigPayload(text);
+      if (result.ok) {
+        setConfigText(text);
+        setConfigDirty(false);
+        setLayerMessage("Animation loaded.");
+      } else {
+        setLayerMessage(result.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const guardUnsaved = (action: () => void) => {
+    if (hasUnsavedChanges) {
+      setPendingSaveAction(() => action);
+      setSaveConfirmOpen(true);
+    } else {
+      action();
     }
   };
 
@@ -1604,8 +1927,12 @@ export function GlbViewer() {
     );
   };
 
-  const pushHistory = (label: string) => {
+  const pushHistory = (label: string, newTracks?: AnimationTrack[]) => {
     const snapshot = captureLayerSnapshot();
+    const tracks = (newTracks ?? animationTracksRef.current).map((t) => ({
+      ...t,
+      keyframes: [...t.keyframes],
+    }));
     const base = historyEntriesRef.current.slice(0, historyIndexRef.current + 1);
     let next = [
       ...base,
@@ -1613,6 +1940,7 @@ export function GlbViewer() {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         label,
         snapshot,
+        tracks,
       },
     ];
     const maxEntries = 40;
@@ -1659,6 +1987,7 @@ export function GlbViewer() {
     historyIndexRef.current = index;
     setHistoryIndex(index);
     applyLayerSnapshot(entry.snapshot);
+    setAnimationTracks(entry.tracks ?? []);
   };
 
   const undoLayerChange = () => {
@@ -1676,9 +2005,19 @@ export function GlbViewer() {
   };
 
   const enterAnimateMode = () => {
-    if (defaultCameraViewRef.current) {
-      applyCameraView(defaultCameraViewRef.current);
+    if (pinnedCameraView) {
+      applyCameraView(pinnedCameraView);
     }
+    setViewMode("animate");
+  };
+
+  const enterPreviewMode = () => {
+    if (!hasModel) return;
+    setIsPlaying(false);
+    setViewMode("preview");
+  };
+
+  const exitPreviewMode = () => {
     setViewMode("animate");
   };
 
@@ -1688,12 +2027,12 @@ export function GlbViewer() {
     const controls = orbitControlsRef.current;
     const camera = cameraRef.current;
     if (controls && camera) {
-      defaultCameraViewRef.current = {
+      setPinnedCameraView({
         position: [camera.position.x, camera.position.y, camera.position.z],
         target: [controls.target.x, controls.target.y, controls.target.z],
         fov: camera.fov,
         zoom: camera.zoom,
-      };
+      });
     }
     setHasMovedInNavigate(false);
     setViewMode("navigate");
@@ -1723,9 +2062,20 @@ export function GlbViewer() {
       const key = event.key.toLowerCase();
       const mod = event.ctrlKey || event.metaKey;
 
+      if (key === "escape" && viewMode === "preview") {
+        exitPreviewMode();
+        return;
+      }
+
       if (key === " " && viewMode === "animate") {
         event.preventDefault();
         togglePlayRef.current();
+        return;
+      }
+
+      if (mod && key === "s") {
+        event.preventDefault();
+        saveToFile();
         return;
       }
 
@@ -1766,17 +2116,17 @@ export function GlbViewer() {
 
       if ((key === "delete" || key === "backspace") && selectedKfIds.size > 0) {
         event.preventDefault();
-        setAnimationTracks((prev) =>
-          prev
-            .map((track) => ({
-              ...track,
-              keyframes: track.keyframes.filter(
-                (kf) => !selectedKfIds.has(makeKfId(track.layerId, track.propertyId, kf.atVh))
-              ),
-            }))
-            .filter((track) => track.keyframes.length > 0)
-        );
+        const newTracks = animationTracks
+          .map((track) => ({
+            ...track,
+            keyframes: track.keyframes.filter(
+              (kf) => !selectedKfIds.has(makeKfId(track.layerId, track.propertyId, kf.atVh))
+            ),
+          }))
+          .filter((track) => track.keyframes.length > 0);
+        setAnimationTracks(newTracks);
         setSelectedKfIds(new Set());
+        pushHistory(`Delete keyframe${selectedKfIds.size > 1 ? "s" : ""}`, newTracks);
         return;
       }
 
@@ -1788,7 +2138,7 @@ export function GlbViewer() {
           for (const kf of track.keyframes) {
             if (selectedKfIds.has(makeKfId(track.layerId, track.propertyId, kf.atVh))) {
               if (kf.atVh < anchor) anchor = kf.atVh;
-              entries.push({ layerId: track.layerId, propertyId: track.propertyId, relVh: kf.atVh, value: kf.value });
+              entries.push({ layerId: track.layerId, propertyId: track.propertyId, relVh: kf.atVh, value: kf.value, easing: kf.easing });
             }
           }
         }
@@ -1800,27 +2150,26 @@ export function GlbViewer() {
       if (mod && key === "v" && clipboardKfsRef.current.length > 0) {
         event.preventDefault();
         const anchorVh = timelineCurrentVh;
-        setAnimationTracks((prev) => {
-          const next = [...prev];
-          for (const entry of clipboardKfsRef.current) {
-            const atVh = Number((anchorVh + entry.relVh).toFixed(2));
-            if (atVh < 0 || atVh > timelineLengthVh) continue;
-            const idx = next.findIndex(
-              (t) => t.layerId === entry.layerId && t.propertyId === entry.propertyId
-            );
-            if (idx < 0) {
-              next.push({ layerId: entry.layerId, propertyId: entry.propertyId, keyframes: [{ atVh, value: entry.value }] });
-            } else {
-              const kfs = [...next[idx].keyframes];
-              const existing = kfs.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
-              if (existing >= 0) kfs[existing] = { atVh, value: entry.value };
-              else kfs.push({ atVh, value: entry.value });
-              kfs.sort((a, b) => a.atVh - b.atVh);
-              next[idx] = { ...next[idx], keyframes: kfs };
-            }
+        const next = [...animationTracks];
+        for (const entry of clipboardKfsRef.current) {
+          const atVh = Number((anchorVh + entry.relVh).toFixed(2));
+          if (atVh < 0 || atVh > timelineLengthVh) continue;
+          const idx = next.findIndex(
+            (t) => t.layerId === entry.layerId && t.propertyId === entry.propertyId
+          );
+          if (idx < 0) {
+            next.push({ layerId: entry.layerId, propertyId: entry.propertyId, keyframes: [{ atVh, value: entry.value, easing: entry.easing }] });
+          } else {
+            const kfs = [...next[idx].keyframes];
+            const existing = kfs.findIndex((kf) => Number(kf.atVh.toFixed(2)) === atVh);
+            if (existing >= 0) kfs[existing] = { ...kfs[existing], value: entry.value, easing: entry.easing };
+            else kfs.push({ atVh, value: entry.value, easing: entry.easing });
+            kfs.sort((a, b) => a.atVh - b.atVh);
+            next[idx] = { ...next[idx], keyframes: kfs };
           }
-          return next;
-        });
+        }
+        setAnimationTracks(next);
+        pushHistory("Paste keyframe(s)", next);
         return;
       }
     };
@@ -1885,6 +2234,73 @@ export function GlbViewer() {
     layerObjectMapRef.current = objectMap;
     setLayerMessage("Layer duplicated.");
     pushHistory(`Duplicate: ${layerName}`);
+  };
+
+  const reorderLayer = (draggedId: string, targetId: string, insertBefore: boolean) => {
+    if (!modelScene) return;
+    const draggedObj = layerObjectMapRef.current.get(draggedId);
+    const targetObj = layerObjectMapRef.current.get(targetId);
+    if (!draggedObj || !targetObj) return;
+    if (draggedObj === targetObj) return;
+    if (draggedObj.parent !== targetObj.parent) return;
+    const parent = draggedObj.parent;
+    if (!parent) return;
+    parent.remove(draggedObj);
+    const newTargetIndex = parent.children.indexOf(targetObj);
+    const insertIndex = insertBefore ? newTargetIndex : newTargetIndex + 1;
+    parent.children.splice(insertIndex, 0, draggedObj);
+    draggedObj.parent = parent;
+    const { items, objectMap } = getLayerItems(modelScene);
+    setLayerItems(items);
+    layerObjectMapRef.current = objectMap;
+    pushHistory(`Reorder: ${getLayerName(draggedId)}`);
+  };
+  reorderLayerRef.current = reorderLayer;
+
+  const ungroupLayer = (layerId: string) => {
+    if (!modelScene) return;
+    const obj = layerObjectMapRef.current.get(layerId);
+    if (!obj) return;
+    const layerItem = layerItemsRef.current.find((l) => l.id === layerId);
+    if (!layerItem || layerItem.parentId === null) return;
+    modelScene.attach(obj);
+    const { items, objectMap } = getLayerItems(modelScene);
+    setLayerItems(items);
+    layerObjectMapRef.current = objectMap;
+    pushHistory(`Ungroup: ${getLayerName(layerId)}`);
+  };
+
+  const groupSelectedLayers = (layerIds: string[]) => {
+    if (!modelScene || layerIds.length < 2) return;
+    const items = layerItemsRef.current;
+    const validItems = layerIds
+      .map((id) => items.find((l) => l.id === id))
+      .filter(Boolean) as LayerItem[];
+    if (validItems.length < 2) return;
+    const commonParentId = validItems[0].parentId;
+    if (!validItems.every((l) => l.parentId === commonParentId)) return;
+    const objects = layerIds
+      .map((id) => layerObjectMapRef.current.get(id))
+      .filter((o): o is THREE.Object3D => !!o);
+    if (objects.length < 2) return;
+    const commonParent = objects[0].parent;
+    if (!commonParent || !objects.every((o) => o.parent === commonParent)) return;
+    const indices = objects
+      .map((o) => commonParent.children.indexOf(o))
+      .filter((i) => i !== -1);
+    const minIndex = Math.min(...indices);
+    const group = new THREE.Group();
+    group.name = "Group";
+    objects.forEach((o) => commonParent.remove(o));
+    commonParent.children.splice(minIndex, 0, group);
+    group.parent = commonParent;
+    group.updateMatrixWorld(true);
+    objects.forEach((o) => group.attach(o));
+    const { items: newItems, objectMap } = getLayerItems(modelScene);
+    setLayerItems(newItems);
+    layerObjectMapRef.current = objectMap;
+    setSelectedLayerIds(new Set());
+    pushHistory("Group layers");
   };
 
   const setLayerVisibility = (layerId: string, visible: boolean) => {
@@ -2491,7 +2907,10 @@ export function GlbViewer() {
   return (
     <div
       ref={viewerRef}
-      className="relative h-screen w-screen overflow-hidden"
+      className={cn(
+        "relative w-screen overflow-hidden",
+        viewMode === "preview" ? "fixed inset-0" : "h-screen"
+      )}
       onDragOver={(event) => {
         event.preventDefault();
         setIsDragging(true);
@@ -2564,6 +2983,142 @@ export function GlbViewer() {
         )}
       </div>
 
+      {/* ── Floating menu buttons — only after a model is loaded, not in preview ─── */}
+      {hasModel && viewMode !== "preview" ? (
+        <div
+          className="absolute left-4 top-3 z-50 flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {/* File menu */}
+          <div className="relative">
+            <button
+              type="button"
+              className={cn(
+                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
+                fileMenuOpen && "bg-muted/80"
+              )}
+              onPointerDown={(e) => { e.stopPropagation(); setFileMenuOpen((v) => !v); setEditMenuOpen(false); }}
+            >
+              File <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+            </button>
+            {fileMenuOpen && (
+              <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg">
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => { setFileMenuOpen(false); guardUnsaved(() => setUploadModalOpen(true)); }}
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  Upload Model…
+                </button>
+                <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={!hasModel}
+                  onClick={() => { setFileMenuOpen(false); exportCurrentModel(); }}
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Export Model
+                </button>
+                <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={!hasModel}
+                  onClick={() => { setFileMenuOpen(false); saveToFile(); }}
+                >
+                  <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save</span>
+                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl S</kbd>
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => { setFileMenuOpen(false); guardUnsaved(loadFromFile); }}
+                >
+                  <FolderOpen className="mr-2 h-4 w-4" />
+                  Load…
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Edit menu */}
+          <div className="relative">
+            <button
+              type="button"
+              className={cn(
+                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
+                editMenuOpen && "bg-muted/80"
+              )}
+              onPointerDown={(e) => { e.stopPropagation(); setEditMenuOpen((v) => !v); setFileMenuOpen(false); }}
+            >
+              Edit <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+            </button>
+            {editMenuOpen && (
+              <div className="absolute left-0 top-full z-50 mt-1 w-48 rounded-md border border-border bg-card p-1 shadow-lg">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={undoCount === 0}
+                  onClick={() => { setEditMenuOpen(false); undoLayerChange(); }}
+                >
+                  <span className="flex items-center gap-2"><Undo2 className="h-4 w-4" /> Undo</span>
+                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl Z</kbd>
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={undoCount === 0}
+                  onClick={() => { setEditMenuOpen(false); resetLayerChanges(); }}
+                >
+                  <RotateCcw className="mr-2 h-4 w-4" />
+                  Reset All
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={redoCount === 0}
+                  onClick={() => { setEditMenuOpen(false); redoLayerChange(); }}
+                >
+                  <span className="flex items-center gap-2"><Redo2 className="h-4 w-4" /> Redo</span>
+                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl Shift Z</kbd>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {layerMessage ? (
+            <span className="pl-1 text-xs text-muted-foreground">{layerMessage}</span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* ── Preview HUD ───────────────────────────────────────────── */}
+      {viewMode === "preview" ? (
+        <div className="absolute bottom-8 left-1/2 z-50 -translate-x-1/2 flex items-center gap-3 rounded-full border border-border/40 bg-card/90 px-4 py-2 shadow-lg backdrop-blur-sm">
+          {/* Progress bar */}
+          <div className="h-1 w-32 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-none"
+              style={{ width: `${Math.min(timelineProgress * 100, 100)}%` }}
+            />
+          </div>
+          {/* Position readout — fixed width prevents HUD from resizing as digits change */}
+          <span className="w-24 text-center font-mono text-xs tabular-nums text-muted-foreground">
+            {timelineCurrentVh.toFixed(1)} / {timelineLengthVh} vh
+          </span>
+          {/* Exit button */}
+          <button
+            type="button"
+            className="flex items-center gap-1.5 rounded-full bg-primary px-3 py-0.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            onClick={exitPreviewMode}
+          >
+            <X className="h-3 w-3" /> Exit Preview
+          </button>
+        </div>
+      ) : null}
+
       {isDragging ? (
         <div className="pointer-events-none absolute inset-0 z-30 border-2 border-dashed border-primary/70 bg-primary/10" />
       ) : null}
@@ -2571,60 +3126,7 @@ export function GlbViewer() {
       {!hasModel ? <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div> : null}
 
       {hasModel && viewMode === "animate" ? (
-        <aside className="absolute left-4 top-4 z-40 w-[340px] space-y-2">
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={undoLayerChange}
-              disabled={undoCount === 0}
-            >
-              <Undo2 className="mr-2 h-4 w-4" />
-              Undo
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={resetLayerChanges}
-              disabled={undoCount === 0}
-            >
-              <RotateCcw className="mr-2 h-4 w-4" />
-              Reset
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={redoLayerChange}
-              disabled={redoCount === 0}
-            >
-              <Redo2 className="mr-2 h-4 w-4" />
-              Redo
-            </Button>
-            <Button size="sm" variant="secondary" onClick={exportCurrentModel}>
-              <Download className="mr-2 h-4 w-4" />
-              Export
-            </Button>
-          </div>
-          {layerMessage ? <p className="text-xs text-muted-foreground">{layerMessage}</p> : null}
-
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full justify-between"
-                onClick={() => setUploadOpen((prev) => !prev)}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <PanelLeft className="h-4 w-4" />
-                  Upload
-                </span>
-                {uploadOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {uploadOpen ? <CardContent className="pt-0">{uploadPanel}</CardContent> : null}
-          </Card>
-
+        <aside className="absolute left-4 top-14 z-40 w-[340px] space-y-2">
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
               <Button
@@ -2645,46 +3147,61 @@ export function GlbViewer() {
         </aside>
       ) : null}
 
-      {hasModel ? (
-        <aside className="absolute right-4 top-4 z-40 w-full max-w-md space-y-2">
-          <div className="flex items-center justify-end gap-2">
-            {viewMode === "navigate" ? (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!hasMovedInNavigate}
-                className="border-primary/50 text-primary hover:bg-primary/10 disabled:opacity-40"
-                onClick={() => {
-                  const controls = orbitControlsRef.current;
-                  const camera = cameraRef.current;
-                  if (!controls || !camera) return;
-                  defaultCameraViewRef.current = {
-                    position: [camera.position.x, camera.position.y, camera.position.z],
-                    target: [controls.target.x, controls.target.y, controls.target.z],
-                    fov: camera.fov,
-                    zoom: camera.zoom,
-                  };
-                  setHasMovedInNavigate(false);
-                }}
-              >
-                Pin View
-              </Button>
-            ) : null}
+      {/* ── Navigate / Animate / Preview mode toggle — top-right ─────────── */}
+      {hasModel && viewMode !== "preview" ? (
+        <div
+          className="absolute right-4 top-3 z-50 flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {viewMode === "navigate" ? (
             <Button
               size="sm"
-              variant={viewMode === "navigate" ? "default" : "secondary"}
-              onClick={enterNavigateMode}
+              variant="outline"
+              disabled={!hasMovedInNavigate}
+              className="border-primary/50 text-primary hover:bg-primary/10 disabled:opacity-40"
+              onClick={() => {
+                const controls = orbitControlsRef.current;
+                const camera = cameraRef.current;
+                if (!controls || !camera) return;
+                setPinnedCameraView({
+                  position: [camera.position.x, camera.position.y, camera.position.z],
+                  target: [controls.target.x, controls.target.y, controls.target.z],
+                  fov: camera.fov,
+                  zoom: camera.zoom,
+                });
+                setHasMovedInNavigate(false);
+              }}
             >
-              Navigate
+              Pin View
             </Button>
-            <Button
-              size="sm"
-              variant={viewMode === "animate" ? "default" : "secondary"}
-              onClick={enterAnimateMode}
-            >
-              Animate
-            </Button>
-          </div>
+          ) : null}
+          <Button
+            size="sm"
+            variant={viewMode === "navigate" ? "default" : "secondary"}
+            onClick={enterNavigateMode}
+          >
+            Navigate
+          </Button>
+          <Button
+            size="sm"
+            variant={viewMode === "animate" ? "default" : "secondary"}
+            onClick={enterAnimateMode}
+          >
+            Animate
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="text-muted-foreground hover:text-foreground"
+            onClick={enterPreviewMode}
+          >
+            Preview
+          </Button>
+        </div>
+      ) : null}
+
+      {hasModel && viewMode !== "preview" ? (
+        <aside className="absolute right-4 top-14 z-40 w-full max-w-md space-y-2">
 
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
@@ -3053,6 +3570,7 @@ export function GlbViewer() {
                       ref={setTimelineScrollEl}
                       className="overflow-auto"
                       style={{ maxHeight: `${timelinePanelHeight}px` }}
+                      onDragStart={(e) => e.preventDefault()}
                     >
                       <div style={{ width: `${320 + 12 + trackWidth}px` }}>
                         <div className="sticky top-0 z-30 grid grid-cols-[320px_12px_1fr] border-b bg-card">
@@ -3127,9 +3645,17 @@ export function GlbViewer() {
                           <div key={row.key} className="grid grid-cols-[320px_12px_1fr] border-b last:border-b-0">
                             {row.kind === "layer" ? (
                               <div
+                                data-layer-id={row.layer.id}
                                 className={cn(
                                   "sticky left-0 z-20 flex h-8 items-center gap-1 border-r bg-card px-2 text-xs",
-                                  selectedLayerId === row.layer.id ? "bg-primary/10" : ""
+                                  selectedLayerId === row.layer.id ? "bg-primary/10" : "",
+                                  selectedLayerIds.has(row.layer.id) ? "ring-1 ring-inset ring-primary/60" : "",
+                                  dragOverInfo?.targetId === row.layer.id && dragOverInfo.position === "before"
+                                    ? "border-t-2 border-t-primary"
+                                    : "",
+                                  dragOverInfo?.targetId === row.layer.id && dragOverInfo.position === "after"
+                                    ? "border-b-2 border-b-primary"
+                                    : ""
                                 )}
                                 style={
                                   selectedLayerId === row.layer.id
@@ -3141,9 +3667,20 @@ export function GlbViewer() {
                                   event.stopPropagation();
                                   setLayerContextMenu({ layerId: row.layer.id, x: event.clientX, y: event.clientY });
                                 }}
+                                onPointerDown={(event) => {
+                                  if (event.button !== 0) return;
+                                  const target = event.target as HTMLElement;
+                                  if (target.closest("[data-no-drag]") || target.closest("[role='switch']") || target.closest("input")) return;
+                                  layerDragStartRef.current = {
+                                    layerId: row.layer.id,
+                                    startX: event.clientX,
+                                    startY: event.clientY,
+                                  };
+                                }}
                               >
                                 {row.layer.hasChildren ? (
                                   <Button
+                                    data-no-drag="true"
                                     type="button"
                                     size="sm"
                                     variant="ghost"
@@ -3166,6 +3703,7 @@ export function GlbViewer() {
                                   <span className="inline-block h-6 w-6" />
                                 )}
                                 <Button
+                                  data-no-drag="true"
                                   type="button"
                                   size="sm"
                                   variant="ghost"
@@ -3185,22 +3723,71 @@ export function GlbViewer() {
                                     <ChevronRight className="h-3.5 w-3.5" />
                                   )}
                                 </Button>
-                                <button
-                                  type="button"
-                                  className="min-w-0 flex-1 truncate text-left"
-                                  onClick={() => selectLayer(row.layer.id)}
-                                  title={row.layer.name}
-                                >
+                                {animationTracks.some(
+                                  (t) => t.layerId === row.layer.id && t.keyframes.length > 0
+                                ) ? (
                                   <span
-                                    className={cn(
-                                      "block truncate",
-                                      row.layer.depth > 0 ? "border-l-2 border-slate-500/70 pl-2" : ""
-                                    )}
-                                    style={{ marginLeft: `${Math.min(row.layer.depth, 6) * 10}px` }}
+                                    className="inline-block h-2 w-2 shrink-0 rotate-45 bg-amber-400/80"
+                                    title="Has keyframes"
+                                  />
+                                ) : (
+                                  <span className="inline-block h-2 w-2 shrink-0" />
+                                )}
+                                {renamingLayerId === row.layer.id ? (
+                                  <Input
+                                    autoFocus
+                                    value={renameValue}
+                                    onChange={(event) => setRenameValue(event.target.value)}
+                                    onBlur={() => commitRenameLayer(row.layer.id)}
+                                    onClick={(event) => event.stopPropagation()}
+                                    onDoubleClick={(event) => event.stopPropagation()}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        event.preventDefault();
+                                        commitRenameLayer(row.layer.id);
+                                      } else if (event.key === "Escape") {
+                                        event.preventDefault();
+                                        cancelRenameLayer();
+                                      }
+                                    }}
+                                    className="h-6 min-w-0 flex-1 text-xs"
+                                  />
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="min-w-0 flex-1 truncate text-left"
+                                    onClick={(event) => {
+                                      if (event.ctrlKey || event.metaKey) {
+                                        event.stopPropagation();
+                                        setSelectedLayerIds((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(row.layer.id)) next.delete(row.layer.id);
+                                          else next.add(row.layer.id);
+                                          return next;
+                                        });
+                                      } else {
+                                        selectLayer(row.layer.id);
+                                        setSelectedLayerIds(new Set());
+                                      }
+                                    }}
+                                    onDoubleClick={(event) => {
+                                      event.stopPropagation();
+                                      setRenamingLayerId(row.layer.id);
+                                      setRenameValue(row.layer.name);
+                                    }}
+                                    title={row.layer.name}
                                   >
-                                    {row.layer.name}
-                                  </span>
-                                </button>
+                                    <span
+                                      className={cn(
+                                        "block truncate",
+                                        row.layer.depth > 0 ? "border-l-2 border-slate-500/70 pl-2" : ""
+                                      )}
+                                      style={{ marginLeft: `${Math.min(row.layer.depth, 6) * 10}px` }}
+                                    >
+                                      {row.layer.name}
+                                    </span>
+                                  </button>
+                                )}
                                 <Switch
                                   checked={row.layer.visible}
                                   onCheckedChange={(checked) => setLayerVisibility(row.layer.id, checked)}
@@ -3277,7 +3864,7 @@ export function GlbViewer() {
                                         className="h-4 w-4 p-0"
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          upsertKeyframeAtCurrentTime(row.layer, row.propertyId);
+                                          upsertKeyframeAtCurrentTime(row.layer, row.propertyId, true);
                                         }}
                                         title={
                                           hasKeyframeAtCurrentTime(row.layer.id, row.propertyId)
@@ -3312,17 +3899,35 @@ export function GlbViewer() {
                                   step={getTimelinePropertyStep(row.propertyId)}
                                   value={getTimelinePropertyValue(row.layer, row.propertyId)}
                                   onFocus={() => beginTimelinePropertyEdit(row.layer, row.propertyId)}
-                                  onBlur={() => commitTimelinePropertyEdit(row.layer, row.propertyId)}
-                                  onChange={(event) =>
-                                    applyTimelinePropertyValue(row.layer, row.propertyId, event.target.value)
-                                  }
-                                  className="h-6 w-16 shrink-0 text-[11px]"
+                                  onBlur={() => {
+                                    modifierInputTypingRef.current = false;
+                                    commitTimelinePropertyEdit(row.layer, row.propertyId);
+                                  }}
+                                  onKeyDown={(event) => {
+                                    const isTypingKey =
+                                      /^[0-9.\-eE]$/.test(event.key) ||
+                                      event.key === "Backspace" ||
+                                      event.key === "Delete";
+                                    modifierInputTypingRef.current = isTypingKey;
+                                    if (event.key === "Enter") event.currentTarget.blur();
+                                  }}
+                                  onChange={(event) => {
+                                    applyTimelinePropertyValue(row.layer, row.propertyId, event.target.value);
+                                    if (!modifierInputTypingRef.current) {
+                                      upsertKeyframeAtCurrentTime(row.layer, row.propertyId, true);
+                                    }
+                                    modifierInputTypingRef.current = false;
+                                  }}
+                                  className="h-6 w-24 shrink-0 text-[11px]"
                                 />
                               </div>
                             )}
 
                             <div className="border-r border-border/40 bg-muted/50" />
                             <div
+                              {...(row.kind === "property"
+                                ? { "data-track-row-id": `${row.layer.id}::${row.propertyId}` }
+                                : { "data-track-layer-id": row.layer.id })}
                               className={cn(
                                 "relative",
                                 row.kind === "layer"
@@ -3337,6 +3942,7 @@ export function GlbViewer() {
                               }}
                               onPointerDown={(event) => {
                                 if (event.button !== 0) return;
+                                event.preventDefault();
                                 (document.activeElement as HTMLElement)?.blur();
                                 setIsPlaying(false);
                                 const rect = event.currentTarget.getBoundingClientRect();
@@ -3346,10 +3952,11 @@ export function GlbViewer() {
                                   1
                                 );
                                 const startVh = ratio * timelineLengthVh;
-                                rubberBandRef.current = { startVh, startX: event.clientX };
+                                rubberBandRef.current = { startVh, startX: event.clientX, startY: event.clientY };
                                 timelineSeekDragRef.current = true;
                                 setTimelineSeekVh(snapKeyframeVhRef.current(startVh, event.shiftKey));
                               }}
+                              onDragStart={(e) => e.preventDefault()}
                             >
                               {row.kind === "property"
                                 ? (() => {
@@ -3377,18 +3984,32 @@ export function GlbViewer() {
                                               1
                                             ) * 100}%`,
                                           }}
+                                          onContextMenu={(event) => {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            // Include this keyframe plus any already-selected ones
+                                            const ids = selectedKfIds.has(kfId)
+                                              ? new Set(selectedKfIds)
+                                              : new Set([kfId]);
+                                            setKfContextMenu({ kfIds: ids, x: event.clientX, y: event.clientY });
+                                          }}
                                           onPointerDown={(event) => {
                                             event.stopPropagation();
+                                            event.preventDefault();
                                             (document.activeElement as HTMLElement)?.blur();
                                             let nextSelected: Set<string>;
-                                            if (event.shiftKey) {
+                                            if (event.shiftKey || event.ctrlKey || event.metaKey) {
+                                              // Toggle this keyframe in/out of the selection
                                               nextSelected = new Set(selectedKfIds);
                                               if (nextSelected.has(kfId)) nextSelected.delete(kfId);
                                               else nextSelected.add(kfId);
+                                            } else if (selectedKfIds.has(kfId)) {
+                                              // Clicking an already-selected keyframe preserves the
+                                              // full selection so a drag will move all of them
+                                              nextSelected = new Set(selectedKfIds);
                                             } else {
-                                              nextSelected = selectedKfIds.has(kfId) && selectedKfIds.size === 1
-                                                ? new Set(selectedKfIds)
-                                                : new Set([kfId]);
+                                              // Clicking an unselected keyframe replaces selection
+                                              nextSelected = new Set([kfId]);
                                             }
                                             setSelectedKfIds(nextSelected);
                                             // Start retime drag with snapshot of all selected
@@ -3401,22 +4022,28 @@ export function GlbViewer() {
                                                 }
                                               }
                                             }
-                                            retimeDragRef.current = { startX: event.clientX, snapshot };
+                                            retimeDragRef.current = {
+                                              startX: event.clientX,
+                                              snapshot,
+                                              baselineTracks: animationTracksRef.current.map((t) => ({
+                                                ...t,
+                                                keyframes: [...t.keyframes],
+                                              })),
+                                              latestTracks: animationTracksRef.current,
+                                            };
                                           }}
-                                        />
+                                        >
+                                          {kf.easing && kf.easing !== "linear" && (
+                                            <span
+                                              className="pointer-events-none absolute rounded-full bg-amber-400"
+                                              style={{ width: 4, height: 4, bottom: -5, left: "50%", transform: "translateX(-50%) rotate(-45deg)" }}
+                                            />
+                                          )}
+                                        </span>
                                       );
                                     });
                                   })()
                                 : null}
-                              {rubberBandVh && (
-                                <div
-                                  className="pointer-events-none absolute inset-y-0 z-20 border border-primary/50 bg-primary/10"
-                                  style={{
-                                    left: `${(Math.min(rubberBandVh.a, rubberBandVh.b) / Math.max(1, timelineLengthVh)) * 100}%`,
-                                    width: `${(Math.abs(rubberBandVh.b - rubberBandVh.a) / Math.max(1, timelineLengthVh)) * 100}%`,
-                                  }}
-                                />
-                              )}
                               <span
                                 className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-primary"
                                 style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
@@ -3434,34 +4061,214 @@ export function GlbViewer() {
         </aside>
       ) : null}
 
-      {layerContextMenu ? (
+      {layerContextMenu ? (() => {
+        const contextLayerItem = layerItems.find((l) => l.id === layerContextMenu.layerId);
+        const isMultiSelect =
+          selectedLayerIds.size > 1 && selectedLayerIds.has(layerContextMenu.layerId);
+        const canGroup =
+          isMultiSelect &&
+          [...selectedLayerIds].every(
+            (id) => layerItems.find((l) => l.id === id)?.parentId === contextLayerItem?.parentId
+          );
+        const canUngroup = !!contextLayerItem && contextLayerItem.parentId !== null;
+        return (
+          <div
+            className="fixed z-50 min-w-[180px] rounded-md border border-border bg-card p-1 shadow-lg"
+            style={{ left: layerContextMenu.x, top: layerContextMenu.y }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            {canGroup && (
+              <>
+                <button
+                  type="button"
+                  className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-foreground hover:bg-muted"
+                  onClick={() => {
+                    groupSelectedLayers([...selectedLayerIds]);
+                    setLayerContextMenu(null);
+                  }}
+                >
+                  Group selected ({selectedLayerIds.size})
+                </button>
+                <div className="my-1 border-t border-border" />
+              </>
+            )}
+            <button
+              type="button"
+              className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-foreground hover:bg-muted"
+              onClick={() => {
+                duplicateLayer(layerContextMenu.layerId);
+                setLayerContextMenu(null);
+              }}
+            >
+              Duplicate layer
+            </button>
+            {canUngroup && (
+              <button
+                type="button"
+                className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-foreground hover:bg-muted"
+                onClick={() => {
+                  ungroupLayer(layerContextMenu.layerId);
+                  setLayerContextMenu(null);
+                }}
+              >
+                Ungroup
+              </button>
+            )}
+            <button
+              type="button"
+              className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-muted"
+              onClick={() => {
+                deleteLayer(layerContextMenu.layerId);
+                setLayerContextMenu(null);
+              }}
+            >
+              Delete layer
+            </button>
+          </div>
+        );
+      })() : null}
+
+      {kfContextMenu ? (() => {
+        const EASING_OPTIONS: { value: EasingType; label: string; description: string }[] = [
+          { value: "linear",         label: "Linear",            description: "Constant speed" },
+          { value: "easeIn",         label: "Ease In",           description: "Slow start, fast end" },
+          { value: "easeOut",        label: "Ease Out",          description: "Fast start, slow end" },
+          { value: "easeInOut",      label: "Ease In/Out",       description: "Slow at both ends" },
+          { value: "easeInOutCubic", label: "Ease In/Out Cubic", description: "Stronger slow at both ends" },
+        ];
+        // Detect the current easing of the right-clicked keyframes (first one wins)
+        let currentEasing: EasingType | null = null;
+        outer: for (const track of animationTracksRef.current) {
+          for (const kf of track.keyframes) {
+            if (kfContextMenu.kfIds.has(makeKfId(track.layerId, track.propertyId, kf.atVh))) {
+              currentEasing = kf.easing ?? "linear";
+              break outer;
+            }
+          }
+        }
+        return (
+          <div
+            className="fixed z-50 w-44 rounded-md border border-border bg-card p-1 shadow-lg"
+            style={{ left: kfContextMenu.x, top: kfContextMenu.y }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <p className="px-2 py-1 text-xs font-medium text-muted-foreground">
+              Easing — {kfContextMenu.kfIds.size} keyframe{kfContextMenu.kfIds.size !== 1 ? "s" : ""}
+            </p>
+            <div className="my-1 border-t border-border" />
+            {EASING_OPTIONS.map((opt) => {
+              const isActive = currentEasing === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  className="flex w-full items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-foreground hover:bg-muted"
+                  onClick={() => {
+                    setKeyframeEasing(kfContextMenu.kfIds, opt.value);
+                    setKfContextMenu(null);
+                  }}
+                >
+                  <span className="mt-0.5 w-3 shrink-0 text-primary">{isActive ? "✓" : ""}</span>
+                  <span>
+                    <span className="font-medium">{opt.label}</span>
+                    <span className="block text-xs text-muted-foreground">{opt.description}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        );
+      })() : null}
+
+      {rubberBandVh && (
         <div
-          className="fixed z-50 min-w-[180px] rounded-md border border-border bg-card p-1 shadow-lg"
-          style={{ left: layerContextMenu.x, top: layerContextMenu.y }}
-          onPointerDown={(event) => event.stopPropagation()}
+          className="pointer-events-none fixed z-[100] border border-primary/50 bg-primary/10"
+          style={{
+            top: rubberBandVh.top,
+            height: Math.max(0, rubberBandVh.bottom - rubberBandVh.top),
+            left: Math.min(rubberBandVh.startX, rubberBandVh.endX),
+            width: Math.abs(rubberBandVh.endX - rubberBandVh.startX),
+          }}
+        />
+      )}
+
+      {/* ── Upload model modal ───────────────────────────────────── */}
+      {uploadModalOpen ? (
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60"
+          onPointerDown={() => setUploadModalOpen(false)}
         >
-          <button
-            type="button"
-            className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-foreground hover:bg-accent"
-            onClick={() => {
-              duplicateLayer(layerContextMenu.layerId);
-              setLayerContextMenu(null);
-            }}
+          <div
+            className="w-[420px] rounded-xl border border-border bg-card p-6 shadow-2xl"
+            onPointerDown={(e) => e.stopPropagation()}
           >
-            Duplicate layer
-          </button>
-          <button
-            type="button"
-            className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-accent"
-            onClick={() => {
-              deleteLayer(layerContextMenu.layerId);
-              setLayerContextMenu(null);
-            }}
-          >
-            Delete layer
-          </button>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-base font-semibold">Upload Model</h2>
+              <button
+                type="button"
+                className="rounded p-1 hover:bg-muted"
+                onClick={() => setUploadModalOpen(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {uploadPanel}
+          </div>
         </div>
       ) : null}
+
+      {/* ── Save-confirm dialog ──────────────────────────────────── */}
+      {saveConfirmOpen ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60">
+          <div className="w-[360px] rounded-xl border border-border bg-card p-6 shadow-2xl">
+            <h2 className="mb-1 text-base font-semibold">Unsaved changes</h2>
+            <p className="mb-5 text-sm text-muted-foreground">
+              You have unsaved changes. Save before continuing?
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { setSaveConfirmOpen(false); setPendingSaveAction(null); }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setSaveConfirmOpen(false);
+                  pendingSaveAction?.();
+                  setPendingSaveAction(null);
+                }}
+              >
+                Discard
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  saveToFile();
+                  setSaveConfirmOpen(false);
+                  pendingSaveAction?.();
+                  setPendingSaveAction(null);
+                }}
+              >
+                <Save className="mr-2 h-4 w-4" />
+                Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Hidden JSON file input for Load ─────────────────────── */}
+      <input
+        ref={jsonFileInputRef}
+        type="file"
+        accept=".json"
+        className="hidden"
+        onChange={onJsonFilePick}
+      />
     </div>
   );
 }
