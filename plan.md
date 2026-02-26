@@ -7,8 +7,8 @@
 Ship in small, safe increments. Each phase must be fully stable before moving to the next.
 
 ## Current Status
-- Phases 1–9: Completed
-- Next: Phase 10 (Export v1)
+- Phases 1–10: Completed
+- Next: Phase 11 (UX Polish + Hardening)
 
 ---
 
@@ -124,7 +124,7 @@ Ship in small, safe increments. Each phase must be fully stable before moving to
 
 ---
 
-## Phase 10: Export v1 (Animation JSON + HTML Page)
+## Phase 10: Export v1 (Animation JSON + HTML Page) ✅
 ### Scope
 
 **A. Download Animation JSON** — File menu button (disabled when no tracks):
