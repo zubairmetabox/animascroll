@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Bounds, Center, OrbitControls, PerspectiveCamera } from "@react-three/drei";
+import { Bounds, Center, OrbitControls, PerspectiveCamera, TransformControls } from "@react-three/drei";
 import { EffectComposer, Outline } from "@react-three/postprocessing";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
@@ -36,6 +36,7 @@ import {
   X,
   ZoomIn,
   ZoomOut,
+  Move,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
@@ -484,6 +485,53 @@ function SceneGrid({
   if (!show) return null;
 
   return <gridHelper ref={gridRef} args={[size, divisions, "#748197", "#2d3642"]} position={[0, -1.2, 0]} />;
+}
+
+function MoveGizmo({
+  object,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+}: {
+  object: THREE.Object3D | null;
+  onDragStart: () => void;
+  onDragMove: () => void;
+  onDragEnd: () => void;
+}) {
+  const controlsRef = useRef<any>(null);
+  // Keep callbacks in refs so addEventListener closures are always fresh
+  const startRef = useRef(onDragStart);
+  const moveRef  = useRef(onDragMove);
+  const endRef   = useRef(onDragEnd);
+  startRef.current = onDragStart;
+  moveRef.current  = onDragMove;
+  endRef.current   = onDragEnd;
+
+  useEffect(() => {
+    const controls = controlsRef.current;
+    if (!controls || !object) return;
+    const handleChange    = () => moveRef.current();
+    const handleMouseDown = () => startRef.current();
+    const handleMouseUp   = () => endRef.current();
+    controls.addEventListener("change",    handleChange);
+    controls.addEventListener("mouseDown", handleMouseDown);
+    controls.addEventListener("mouseUp",   handleMouseUp);
+    return () => {
+      controls.removeEventListener("change",    handleChange);
+      controls.removeEventListener("mouseDown", handleMouseDown);
+      controls.removeEventListener("mouseUp",   handleMouseUp);
+    };
+  }, [object]);
+
+  if (!object) return null;
+
+  return (
+    <TransformControls
+      ref={controlsRef}
+      object={object}
+      mode="translate"
+    />
+  );
 }
 
 function SelectionOutline({ object }: { object: THREE.Object3D | null }) {
@@ -939,6 +987,7 @@ export function GlbViewer() {
   } | null>(null);
   const [hoveredKfId, setHoveredKfId] = useState<string | null>(null);
   const [retimeIndicatorVh, setRetimeIndicatorVh] = useState<number | null>(null);
+  const [moveToolActive, setMoveToolActive] = useState(false);
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [layerDetailsOpen, setLayerDetailsOpen] = useState<Record<string, boolean>>({});
@@ -2419,6 +2468,7 @@ export function GlbViewer() {
   const enterPreviewMode = () => {
     if (!hasModel) return;
     setIsPlaying(false);
+    setMoveToolActive(false);
     setViewMode("preview");
   };
 
@@ -2440,6 +2490,7 @@ export function GlbViewer() {
       });
     }
     setHasMovedInNavigate(false);
+    setMoveToolActive(false);
     setViewMode("navigate");
   };
 
@@ -2594,10 +2645,15 @@ export function GlbViewer() {
         togglePlayRef.current();
         return;
       }
+      if (key === "g" && selectedLayerId) {
+        event.preventDefault();
+        setMoveToolActive((prev) => !prev);
+        return;
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [viewMode, selectedKfIds, animationTracks, timelineCurrentVh, timelineLengthVh, stepVhBackward, stepVhForward]);
+  }, [viewMode, selectedKfIds, animationTracks, timelineCurrentVh, timelineLengthVh, stepVhBackward, stepVhForward, selectedLayerId]);
 
   const deleteLayer = (layerId: string) => {
     const object = layerObjectMapRef.current.get(layerId);
@@ -3384,6 +3440,28 @@ export function GlbViewer() {
               object={selectedLayerId ? (layerObjectMapRef.current.get(selectedLayerId) ?? null) : null}
             />
 
+            {moveToolActive && viewMode === "animate" && (
+              <MoveGizmo
+                object={selectedLayerId ? (layerObjectMapRef.current.get(selectedLayerId) ?? null) : null}
+                onDragStart={() => {
+                  if (selectedLayerId) beginLayerTransform(selectedLayerId);
+                }}
+                onDragMove={() => {
+                  if (selectedLayerId) syncLayerTransform(selectedLayerId);
+                }}
+                onDragEnd={() => {
+                  if (!selectedLayerId) return;
+                  commitLayerTransform(selectedLayerId);
+                  const layer = layerItemsRef.current.find((l) => l.id === selectedLayerId);
+                  if (layer) {
+                    upsertKeyframeAtCurrentTimeRef.current(layer, "position.x", false);
+                    upsertKeyframeAtCurrentTimeRef.current(layer, "position.y", false);
+                    upsertKeyframeAtCurrentTimeRef.current(layer, "position.z", false);
+                  }
+                }}
+              />
+            )}
+
             <Bounds fit clip={false} observe={false} margin={1.1}>
               <Center>
                 <primitive object={modelScene} dispose={null} />
@@ -3531,6 +3609,26 @@ export function GlbViewer() {
               </div>
             )}
           </div>
+
+          {viewMode === "animate" && selectedLayerId ? (
+            <>
+              <div className="mx-1 h-4 w-px bg-border/60" />
+              <button
+                type="button"
+                title="Move tool (G)"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm font-medium transition-colors",
+                  moveToolActive
+                    ? "bg-primary text-primary-foreground"
+                    : "hover:bg-muted/80 text-muted-foreground hover:text-foreground"
+                )}
+                onClick={() => setMoveToolActive((v) => !v)}
+              >
+                <Move className="h-3.5 w-3.5" />
+                Move
+              </button>
+            </>
+          ) : null}
 
           {layerMessage ? (
             <span className="pl-1 text-xs text-muted-foreground">{layerMessage}</span>
