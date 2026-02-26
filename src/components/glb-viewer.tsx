@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Bounds, Center, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -33,6 +33,8 @@ import {
   Undo2,
   Upload,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
@@ -1121,6 +1123,9 @@ export function GlbViewer() {
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [hasUnsavedChanges]);
 
+  const layerMenuRef = useRef<HTMLDivElement | null>(null);
+  const kfMenuRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     if (!layerContextMenu) return;
     const closeMenu = () => setLayerContextMenu(null);
@@ -1132,6 +1137,17 @@ export function GlbViewer() {
     };
   }, [layerContextMenu]);
 
+  useLayoutEffect(() => {
+    const el = layerMenuRef.current;
+    if (!el || !layerContextMenu) return;
+    const rect = el.getBoundingClientRect();
+    const pad = 8;
+    if (rect.bottom > window.innerHeight - pad)
+      el.style.top = `${Math.max(pad, window.innerHeight - rect.height - pad)}px`;
+    if (rect.right > window.innerWidth - pad)
+      el.style.left = `${Math.max(pad, window.innerWidth - rect.width - pad)}px`;
+  }, [layerContextMenu]);
+
   useEffect(() => {
     if (!kfContextMenu) return;
     const closeMenu = () => setKfContextMenu(null);
@@ -1141,6 +1157,17 @@ export function GlbViewer() {
       window.removeEventListener("pointerdown", closeMenu);
       window.removeEventListener("scroll", closeMenu, true);
     };
+  }, [kfContextMenu]);
+
+  useLayoutEffect(() => {
+    const el = kfMenuRef.current;
+    if (!el || !kfContextMenu) return;
+    const rect = el.getBoundingClientRect();
+    const pad = 8;
+    if (rect.bottom > window.innerHeight - pad)
+      el.style.top = `${Math.max(pad, window.innerHeight - rect.height - pad)}px`;
+    if (rect.right > window.innerWidth - pad)
+      el.style.left = `${Math.max(pad, window.innerWidth - rect.width - pad)}px`;
   }, [kfContextMenu]);
 
   useEffect(() => {
@@ -1303,7 +1330,7 @@ export function GlbViewer() {
       if (timelineSeekDragRef.current && timelineRulerRef.current) {
         const rect = timelineRulerRef.current.getBoundingClientRect();
         const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-        const raw = THREE.MathUtils.clamp(ratio * timelineLengthVh, 0, timelineLengthVh);
+        const raw = Math.round(THREE.MathUtils.clamp(ratio * timelineLengthVh, 0, timelineLengthVh));
         const next = snapKeyframeVhRef.current(raw, event.shiftKey);
         setTimelineCurrentVh(Number(next.toFixed(2)));
         setTimelineProgress(THREE.MathUtils.clamp(next / Math.max(1, timelineLengthVh), 0, 1));
@@ -1501,6 +1528,20 @@ export function GlbViewer() {
     setTimelineCurrentVh(Number(next.toFixed(2)));
     setTimelineProgress(THREE.MathUtils.clamp(next / Math.max(1, timelineLengthVh), 0, 1));
   }, [timelineLengthVh]);
+
+  const stepVhBackward = useCallback(() => {
+    setIsPlaying(false);
+    const cur = timelineCurrentVhRef.current;
+    const floored = Math.floor(cur);
+    setTimelineSeekVh(cur > floored + 1e-9 ? floored : Math.max(0, floored - 1));
+  }, [setTimelineSeekVh]);
+
+  const stepVhForward = useCallback(() => {
+    setIsPlaying(false);
+    const cur = timelineCurrentVhRef.current;
+    const ceiled = Math.ceil(cur);
+    setTimelineSeekVh(cur < ceiled - 1e-9 ? ceiled : ceiled + 1);
+  }, [setTimelineSeekVh, timelineLengthVh]);
 
   const hasTrackKeyframes = (layerId: string, propertyId: string) => {
     const track = getTrack(layerId, propertyId);
@@ -2513,18 +2554,12 @@ export function GlbViewer() {
       // J/K/L transport shortcuts (Premiere/Resolve style)
       if (key === "j") {
         event.preventDefault();
-        setIsPlaying(false);
-        const nextVh = Math.max(0, timelineCurrentVh - 1);
-        setTimelineCurrentVh(Number(nextVh.toFixed(2)));
-        setTimelineProgress(THREE.MathUtils.clamp(nextVh / Math.max(1, timelineLengthVh), 0, 1));
+        stepVhBackward();
         return;
       }
       if (key === "l") {
         event.preventDefault();
-        setIsPlaying(false);
-        const nextVh = Math.min(timelineLengthVh, timelineCurrentVh + 1);
-        setTimelineCurrentVh(Number(nextVh.toFixed(2)));
-        setTimelineProgress(THREE.MathUtils.clamp(nextVh / Math.max(1, timelineLengthVh), 0, 1));
+        stepVhForward();
         return;
       }
       if (key === "k") {
@@ -2535,7 +2570,7 @@ export function GlbViewer() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [viewMode, selectedKfIds, animationTracks, timelineCurrentVh, timelineLengthVh]);
+  }, [viewMode, selectedKfIds, animationTracks, timelineCurrentVh, timelineLengthVh, stepVhBackward, stepVhForward]);
 
   const deleteLayer = (layerId: string) => {
     const object = layerObjectMapRef.current.get(layerId);
@@ -3504,13 +3539,13 @@ export function GlbViewer() {
       {!hasModel ? <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div> : null}
 
       {hasModel && viewMode === "animate" ? (
-        <aside className="absolute left-4 top-14 z-40 w-[340px] space-y-2">
+        <aside className="absolute left-4 top-14 z-50 w-fit space-y-2">
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
               <Button
                 type="button"
                 variant="secondary"
-                className="w-full justify-between"
+                className="w-full min-w-[160px] justify-between"
                 onClick={() => setHistoryOpen((prev) => !prev)}
               >
                 <span className="inline-flex items-center gap-2">
@@ -3579,14 +3614,14 @@ export function GlbViewer() {
       ) : null}
 
       {hasModel && viewMode !== "preview" ? (
-        <aside className="absolute right-4 top-14 z-40 w-full max-w-md space-y-2">
+        <aside className="absolute right-4 top-14 z-50 w-fit space-y-2">
 
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
               <Button
                 type="button"
                 variant="secondary"
-                className="w-full justify-between"
+                className="w-full min-w-[160px] justify-between"
                 onClick={() => setShowCustomize((prev) => !prev)}
               >
                 <span className="inline-flex items-center gap-2">
@@ -3890,20 +3925,40 @@ export function GlbViewer() {
                   <Label htmlFor="timeline-current-vh" className="text-xs text-muted-foreground">
                     Current (vh)
                   </Label>
-                  <Input
-                    id="timeline-current-vh"
-                    type="number"
-                    min={0}
-                    max={timelineLengthVh}
-                    step={0.01}
-                    value={timelineCurrentVh}
-                    onChange={(event) => {
-                      const parsed = Number(event.target.value);
-                      if (Number.isNaN(parsed)) return;
-                      setTimelineSeekVh(parsed);
-                    }}
-                    className="h-8 w-24 text-xs"
-                  />
+                  <div className="flex items-center">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 w-6 p-0"
+                      onClick={stepVhBackward}
+                      title="Step back 1 vh (J)"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                    </Button>
+                    <Input
+                      id="timeline-current-vh"
+                      type="number"
+                      min={0}
+                      max={timelineLengthVh}
+                      step={0.01}
+                      value={timelineCurrentVh}
+                      onChange={(event) => {
+                        const parsed = Number(event.target.value);
+                        if (Number.isNaN(parsed)) return;
+                        setTimelineSeekVh(parsed);
+                      }}
+                      className="h-8 w-20 text-xs"
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 w-6 p-0"
+                      onClick={stepVhForward}
+                      title="Step forward 1 vh (L)"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
                   <Label htmlFor="timeline-length" className="text-xs text-muted-foreground">
                     Length (vh)
                   </Label>
@@ -3922,16 +3977,18 @@ export function GlbViewer() {
                     variant="outline"
                     className="h-8 w-8 p-0"
                     onClick={() => adjustTimelineZoom("out")}
+                    title="Zoom out"
                   >
-                    -
+                    <ZoomOut className="h-3.5 w-3.5" />
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
                     className="h-8 w-8 p-0"
                     onClick={() => adjustTimelineZoom("in")}
+                    title="Zoom in"
                   >
-                    +
+                    <ZoomIn className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               </div>
@@ -3969,7 +4026,7 @@ export function GlbViewer() {
                                 0,
                                 1
                               );
-                              setTimelineSeekVh(snapKeyframeVhRef.current(ratio * timelineLengthVh, event.shiftKey));
+                              setTimelineSeekVh(snapKeyframeVhRef.current(Math.round(ratio * timelineLengthVh), event.shiftKey));
                             }}
                           >
                             {Array.from({ length: markerCount + 1 }).map((_, index) => {
@@ -4009,7 +4066,7 @@ export function GlbViewer() {
                                     0,
                                     1
                                   );
-                                  setTimelineSeekVh(snapKeyframeVhRef.current(ratio * timelineLengthVh, event.shiftKey));
+                                  setTimelineSeekVh(snapKeyframeVhRef.current(Math.round(ratio * timelineLengthVh), event.shiftKey));
                                 }
                               }}
                               title="Drag playhead"
@@ -4426,7 +4483,7 @@ export function GlbViewer() {
                                           )}
                                           {/* Hover tooltip */}
                                           {hoveredKfId === kfId && (
-                                            <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 -translate-x-1/2 whitespace-nowrap rounded border border-border bg-popover px-2 py-1 text-[11px] shadow-md">
+                                            <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 -translate-x-1/2 whitespace-nowrap rounded border border-border bg-card px-2 py-1 text-[11px] shadow-md">
                                               <span className="font-mono text-foreground">{kf.atVh.toFixed(2)} vh</span>
                                               <span className="mx-1 text-border">·</span>
                                               <span className="font-mono text-foreground">{Number(kf.value.toFixed(4))}</span>
@@ -4474,6 +4531,7 @@ export function GlbViewer() {
         const canUngroup = !!contextLayerItem && contextLayerItem.parentId !== null;
         return (
           <div
+            ref={layerMenuRef}
             className="fixed z-50 min-w-[180px] rounded-md border border-border bg-card p-1 shadow-lg"
             style={{ left: layerContextMenu.x, top: layerContextMenu.y }}
             onPointerDown={(event) => event.stopPropagation()}
@@ -4549,6 +4607,7 @@ export function GlbViewer() {
         }
         return (
           <div
+            ref={kfMenuRef}
             className="fixed z-50 w-44 rounded-md border border-border bg-card p-1 shadow-lg"
             style={{ left: kfContextMenu.x, top: kfContextMenu.y }}
             onPointerDown={(event) => event.stopPropagation()}
