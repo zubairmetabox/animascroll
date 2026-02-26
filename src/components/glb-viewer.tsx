@@ -908,6 +908,8 @@ export function GlbViewer() {
     x: number;
     y: number;
   } | null>(null);
+  const [hoveredKfId, setHoveredKfId] = useState<string | null>(null);
+  const [retimeIndicatorVh, setRetimeIndicatorVh] = useState<number | null>(null);
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [layerDetailsOpen, setLayerDetailsOpen] = useState<Record<string, boolean>>({});
@@ -1228,6 +1230,12 @@ export function GlbViewer() {
         });
         retimeDragRef.current.latestTracks = retimeTracks;
         setAnimationTracks(retimeTracks);
+        // Show indicator at the first dragged keyframe's new position
+        if (snapshot.length > 0) {
+          setRetimeIndicatorVh(
+            Number(THREE.MathUtils.clamp(snapshot[0].origAtVh + deltaVh, 0, timelineLengthVh).toFixed(2))
+          );
+        }
         setSelectedKfIds(
           new Set(
             snapshot.map((s) => {
@@ -1309,8 +1317,9 @@ export function GlbViewer() {
       const retimeLatest = retimeDragRef.current?.latestTracks ?? null;
       const hadRetimeDrag = retimeDragRef.current !== null;
       retimeDragRef.current = null;
-      if (hadRetimeDrag && retimeLatest) {
-        pushHistory("Retime keyframe", retimeLatest);
+      if (hadRetimeDrag) {
+        setRetimeIndicatorVh(null);
+        if (retimeLatest) pushHistory("Retime keyframe", retimeLatest);
       }
 
       // Commit layer drag
@@ -2498,6 +2507,29 @@ export function GlbViewer() {
         }
         setAnimationTracks(next);
         pushHistory("Paste keyframe(s)", next);
+        return;
+      }
+
+      // J/K/L transport shortcuts (Premiere/Resolve style)
+      if (key === "j") {
+        event.preventDefault();
+        setIsPlaying(false);
+        const nextVh = Math.max(0, timelineCurrentVh - 1);
+        setTimelineCurrentVh(Number(nextVh.toFixed(2)));
+        setTimelineProgress(THREE.MathUtils.clamp(nextVh / Math.max(1, timelineLengthVh), 0, 1));
+        return;
+      }
+      if (key === "l") {
+        event.preventDefault();
+        setIsPlaying(false);
+        const nextVh = Math.min(timelineLengthVh, timelineCurrentVh + 1);
+        setTimelineCurrentVh(Number(nextVh.toFixed(2)));
+        setTimelineProgress(THREE.MathUtils.clamp(nextVh / Math.max(1, timelineLengthVh), 0, 1));
+        return;
+      }
+      if (key === "k") {
+        event.preventDefault();
+        togglePlayRef.current();
         return;
       }
     };
@@ -4315,21 +4347,17 @@ export function GlbViewer() {
                                       return (
                                         <span
                                           key={`kf-${row.layer.id}-${row.propertyId}-${idx}`}
-                                          className={cn(
-                                            "absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 -translate-x-1/2 rotate-45 border",
-                                            isSelected
-                                              ? "z-10 border-primary bg-primary/60"
-                                              : isAtPlayhead
-                                                ? "border-primary bg-primary"
-                                                : "border-muted-foreground/70 bg-background/95"
-                                          )}
+                                          className="absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 -translate-x-1/2"
                                           style={{
                                             left: `${THREE.MathUtils.clamp(
                                               kf.atVh / Math.max(1, timelineLengthVh),
                                               0,
                                               1
                                             ) * 100}%`,
+                                            zIndex: hoveredKfId === kfId ? 40 : isSelected ? 10 : undefined,
                                           }}
+                                          onPointerEnter={() => setHoveredKfId(kfId)}
+                                          onPointerLeave={() => setHoveredKfId(null)}
                                           onContextMenu={(event) => {
                                             event.preventDefault();
                                             event.stopPropagation();
@@ -4340,6 +4368,7 @@ export function GlbViewer() {
                                             setKfContextMenu({ kfIds: ids, x: event.clientX, y: event.clientY });
                                           }}
                                           onPointerDown={(event) => {
+                                            setHoveredKfId(null);
                                             event.stopPropagation();
                                             event.preventDefault();
                                             (document.activeElement as HTMLElement)?.blur();
@@ -4379,11 +4408,31 @@ export function GlbViewer() {
                                             };
                                           }}
                                         >
+                                          {/* Visual diamond */}
+                                          <span className={cn(
+                                            "absolute inset-0 rotate-45 border",
+                                            isSelected
+                                              ? "border-primary bg-primary/60"
+                                              : isAtPlayhead
+                                                ? "border-primary bg-primary"
+                                                : "border-muted-foreground/70 bg-background/95"
+                                          )} />
+                                          {/* Non-linear easing dot */}
                                           {kf.easing && kf.easing !== "linear" && (
                                             <span
                                               className="pointer-events-none absolute rounded-full bg-amber-400"
-                                              style={{ width: 4, height: 4, bottom: -5, left: "50%", transform: "translateX(-50%) rotate(-45deg)" }}
+                                              style={{ width: 4, height: 4, bottom: -5, left: "50%", transform: "translateX(-50%)" }}
                                             />
+                                          )}
+                                          {/* Hover tooltip */}
+                                          {hoveredKfId === kfId && (
+                                            <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 -translate-x-1/2 whitespace-nowrap rounded border border-border bg-popover px-2 py-1 text-[11px] shadow-md">
+                                              <span className="font-mono text-foreground">{kf.atVh.toFixed(2)} vh</span>
+                                              <span className="mx-1 text-border">·</span>
+                                              <span className="font-mono text-foreground">{Number(kf.value.toFixed(4))}</span>
+                                              <span className="mx-1 text-border">·</span>
+                                              <span className="text-muted-foreground">{kf.easing ?? "linear"}</span>
+                                            </div>
                                           )}
                                         </span>
                                       );
@@ -4394,6 +4443,12 @@ export function GlbViewer() {
                                 className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-primary"
                                 style={{ left: `${Math.max(0, Math.min(1, timelineProgress)) * 100}%` }}
                               />
+                              {retimeIndicatorVh !== null && (
+                                <span
+                                  className="pointer-events-none absolute bottom-0 top-0 w-px bg-amber-400/80"
+                                  style={{ left: `${THREE.MathUtils.clamp(retimeIndicatorVh / Math.max(1, timelineLengthVh), 0, 1) * 100}%` }}
+                                />
+                              )}
                             </div>
                           </div>
                         ))}
