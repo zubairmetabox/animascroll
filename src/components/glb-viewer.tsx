@@ -82,6 +82,16 @@ type ConfigPayload = {
   animationTracks?: AnimationTrack[];
 };
 
+type ExportConfig = {
+  backgroundColor: string;
+  useAmbientLight: boolean;
+  ambientIntensity: number;
+  pointLights: { color: string; intensity: number; x: number; y: number; z: number }[];
+  pinnedCamera: { position: [number, number, number]; target: [number, number, number]; fov: number } | null;
+  timelineLengthVh: number;
+  tracks: { layerName: string; propertyId: string; keyframes: { atVh: number; value: number; easing: string }[] }[];
+};
+
 type LayerItem = {
   id: string;
   parentId: string | null;
@@ -229,6 +239,164 @@ function applyEasing(t: number, easing: EasingType = "linear"): number {
       return t < 0.5 ? 4 * t * t * t : (t - 1) * (2 * t - 2) * (2 * t - 2) + 1;
     default:          return t; // linear
   }
+}
+
+function generateAnimationHtml(glbDataUrl: string, cfg: ExportConfig): string {
+  const cfgJson = JSON.stringify(cfg);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Animation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { overflow-x: hidden; }
+body { background: ${cfg.backgroundColor}; }
+#canvas-wrap { position: fixed; inset: 0; }
+canvas { display: block; width: 100% !important; height: 100% !important; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="canvas-wrap"><canvas id="c"></canvas></div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const CFG = ${cfgJson};
+const GLB_DATA_URL = '${glbDataUrl}';
+
+function applyEasing(t, easing) {
+  switch (easing) {
+    case 'easeIn':         return t * t;
+    case 'easeOut':        return t * (2 - t);
+    case 'easeInOut':      return t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+    case 'easeInOutCubic': return t < 0.5 ? 4*t*t*t : (t-1)*(2*t-2)*(2*t-2)+1;
+    default:               return t;
+  }
+}
+
+function evaluateTrack(track, atVh) {
+  const kfs = track.keyframes;
+  if (!kfs.length) return 0;
+  if (kfs.length === 1 || atVh <= kfs[0].atVh) return kfs[0].value;
+  if (atVh >= kfs[kfs.length - 1].atVh) return kfs[kfs.length - 1].value;
+  for (let i = 0; i < kfs.length - 1; i++) {
+    if (kfs[i].atVh <= atVh && kfs[i + 1].atVh >= atVh) {
+      const raw = (atVh - kfs[i].atVh) / Math.max(1e-9, kfs[i + 1].atVh - kfs[i].atVh);
+      const t = applyEasing(raw, kfs[i].easing || 'linear');
+      return kfs[i].value + t * (kfs[i + 1].value - kfs[i].value);
+    }
+  }
+  return kfs[kfs.length - 1].value;
+}
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(CFG.backgroundColor);
+renderer.shadowMap.enabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(CFG.backgroundColor);
+
+const camera = new THREE.PerspectiveCamera(
+  CFG.pinnedCamera ? CFG.pinnedCamera.fov : 45,
+  window.innerWidth / window.innerHeight, 0.01, 1000
+);
+if (CFG.pinnedCamera) {
+  const p = CFG.pinnedCamera.position;
+  const t = CFG.pinnedCamera.target;
+  camera.position.set(p[0], p[1], p[2]);
+  camera.lookAt(new THREE.Vector3(t[0], t[1], t[2]));
+}
+
+if (CFG.useAmbientLight) {
+  scene.add(new THREE.AmbientLight(0xffffff, CFG.ambientIntensity));
+}
+CFG.pointLights.forEach(function(l) {
+  const light = new THREE.PointLight(l.color, l.intensity, 100);
+  light.position.set(l.x, l.y, l.z);
+  scene.add(light);
+});
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+}
+onResize();
+window.addEventListener('resize', onResize);
+
+document.body.style.height = (CFG.timelineLengthVh + 100) + 'vh';
+let currentVh = 0;
+function onScroll() {
+  const maxScroll = (CFG.timelineLengthVh / 100) * window.innerHeight;
+  currentVh = Math.min(Math.max(
+    (window.scrollY / Math.max(1, maxScroll)) * CFG.timelineLengthVh, 0
+  ), CFG.timelineLengthVh);
+}
+window.addEventListener('scroll', onScroll, { passive: true });
+window.addEventListener('resize', onScroll);
+
+const objMap = {};
+function applyValue(obj, propertyId, value) {
+  switch (propertyId) {
+    case 'position.x': obj.position.x = value; break;
+    case 'position.y': obj.position.y = value; break;
+    case 'position.z': obj.position.z = value; break;
+    case 'rotation.x': obj.rotation.x = THREE.MathUtils.degToRad(value); break;
+    case 'rotation.y': obj.rotation.y = THREE.MathUtils.degToRad(value); break;
+    case 'rotation.z': obj.rotation.z = THREE.MathUtils.degToRad(value); break;
+    case 'scale.uniform': obj.scale.setScalar(value); break;
+    case 'opacity':
+      obj.traverse(function(child) {
+        if (child.isMesh && child.material) {
+          child.material.transparent = true;
+          child.material.opacity = Math.min(Math.max(value, 0), 1);
+          child.material.needsUpdate = true;
+        }
+      });
+      break;
+  }
+}
+
+function applyTracks() {
+  CFG.tracks.forEach(function(track) {
+    const obj = objMap[track.layerName];
+    if (!obj) return;
+    applyValue(obj, track.propertyId, evaluateTrack(track, currentVh));
+  });
+}
+
+const loader = new GLTFLoader();
+loader.load(GLB_DATA_URL, function(gltf) {
+  scene.add(gltf.scene);
+  gltf.scene.traverse(function(obj) {
+    if (obj.name) objMap[obj.name] = obj;
+  });
+  applyTracks();
+  requestAnimationFrame(render);
+}, undefined, function(err) {
+  console.error('GLB load error', err);
+});
+
+function render() {
+  applyTracks();
+  renderer.render(scene, camera);
+  requestAnimationFrame(render);
+}
+</script>
+</body>
+</html>`;
 }
 
 function disposeScene(scene: THREE.Object3D) {
@@ -1807,6 +1975,78 @@ export function GlbViewer() {
     setLayerMessage("Saved.");
   };
 
+  const downloadAnimationJson = () => {
+    const data = {
+      version: 1,
+      pinnedCameraView: pinnedCameraView ?? null,
+      timeline: { lengthVh: timelineLengthVh },
+      tracks: animationTracks.map((t) => ({
+        layerId: t.layerId,
+        layerName: getLayerName(t.layerId),
+        propertyId: t.propertyId,
+        keyframes: t.keyframes.map(({ atVh, value, easing }) => ({ atVh, value, easing: easing ?? "linear" })),
+      })),
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "animation.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setLayerMessage("Animation JSON downloaded.");
+  };
+
+  const exportHtmlAnimation = () => {
+    if (!modelScene) return;
+    const exporter = new GLTFExporter();
+    const clone = modelScene.clone(true);
+    exporter.parse(
+      clone,
+      (result) => {
+        const arrayBuffer = result instanceof ArrayBuffer ? result : new TextEncoder().encode(JSON.stringify(result)).buffer;
+        const bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
+        let binary = "";
+        for (let i = 0; i < bytes.byteLength; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const glbDataUrl = `data:model/gltf-binary;base64,${btoa(binary)}`;
+        const cfg: ExportConfig = {
+          backgroundColor: settings.backgroundColor,
+          useAmbientLight: settings.useAmbientLight,
+          ambientIntensity: settings.ambientIntensity,
+          pointLights: pointLights
+            .filter((l) => l.enabled)
+            .map((l) => ({ color: l.color, intensity: l.intensity, x: l.x, y: l.y, z: l.z })),
+          pinnedCamera: pinnedCameraView
+            ? { position: pinnedCameraView.position, target: pinnedCameraView.target, fov: pinnedCameraView.fov }
+            : null,
+          timelineLengthVh,
+          tracks: animationTracks.map((t) => ({
+            layerName: getLayerName(t.layerId),
+            propertyId: t.propertyId,
+            keyframes: t.keyframes.map(({ atVh, value, easing }) => ({ atVh, value, easing: easing ?? "linear" })),
+          })),
+        };
+        const html = generateAnimationHtml(glbDataUrl, cfg);
+        const blob2 = new Blob([html], { type: "text/html" });
+        const url = URL.createObjectURL(blob2);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "animation.html";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        setLayerMessage("HTML animation exported.");
+      },
+      () => { setLayerMessage("Failed to export HTML."); },
+      { binary: true, onlyVisible: true }
+    );
+  };
+
   const loadFromFile = () => jsonFileInputRef.current?.click();
 
   const onJsonFilePick = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -3020,6 +3260,24 @@ export function GlbViewer() {
                 >
                   <Download className="mr-2 h-4 w-4" />
                   Export Model
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={animationTracks.length === 0}
+                  onClick={() => { setFileMenuOpen(false); downloadAnimationJson(); }}
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Download Animation JSON
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={!hasModel || animationTracks.length === 0}
+                  onClick={() => { setFileMenuOpen(false); exportHtmlAnimation(); }}
+                >
+                  <Code2 className="mr-2 h-4 w-4" />
+                  Export HTML Page
                 </button>
                 <div className="my-1 border-t border-border" />
                 <button
