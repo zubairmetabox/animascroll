@@ -1613,14 +1613,21 @@ export function GlbViewer() {
         updateLayerCoordinate(layer.id, "z", rawValue);
         return;
       case "rotation.x":
-        updateLayerRotationCoordinate(layer.id, "x", rawValue);
-        return;
       case "rotation.y":
-        updateLayerRotationCoordinate(layer.id, "y", rawValue);
+      case "rotation.z": {
+        // Set euler angle directly — no position compensation here.
+        // setObjectRotationFromCenter adjusts position to keep the visual
+        // center fixed, which is correct for one-shot interactive edits but
+        // causes cumulative drift when called every scrub frame.
+        const rotObj = layerObjectMapRef.current.get(layer.id);
+        if (!rotObj) return;
+        const rotVal = Number(rawValue);
+        if (Number.isNaN(rotVal)) return;
+        const rotAxis = propertyId.split(".")[1] as "x" | "y" | "z";
+        rotObj.rotation[rotAxis] = THREE.MathUtils.degToRad(rotVal);
+        syncLayerTransform(layer.id);
         return;
-      case "rotation.z":
-        updateLayerRotationCoordinate(layer.id, "z", rawValue);
-        return;
+      }
       case "scale.uniform":
         updateLayerUniformScale(layer.id, rawValue);
         return;
