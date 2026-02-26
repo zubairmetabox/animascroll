@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bounds, Center, OrbitControls, PerspectiveCamera } from "@react-three/drei";
+import { EffectComposer, Outline } from "@react-three/postprocessing";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import {
@@ -483,6 +484,32 @@ function SceneGrid({
   if (!show) return null;
 
   return <gridHelper ref={gridRef} args={[size, divisions, "#748197", "#2d3642"]} position={[0, -1.2, 0]} />;
+}
+
+function SelectionOutline({ object }: { object: THREE.Object3D | null }) {
+  const meshes = useMemo(() => {
+    if (!object) return [];
+    const result: THREE.Mesh[] = [];
+    object.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) result.push(child as THREE.Mesh);
+    });
+    return result;
+  }, [object]);
+
+  if (!meshes.length) return null;
+
+  return (
+    <EffectComposer autoClear={false}>
+      <Outline
+        selection={meshes}
+        edgeStrength={5}
+        visibleEdgeColor={0x818cf8}
+        hiddenEdgeColor={0x818cf8}
+        pulseSpeed={0}
+        blur={false}
+      />
+    </EffectComposer>
+  );
 }
 
 function SliderField({
@@ -3353,6 +3380,10 @@ export function GlbViewer() {
               fadeDistance={30}
             />
 
+            <SelectionOutline
+              object={selectedLayerId ? (layerObjectMapRef.current.get(selectedLayerId) ?? null) : null}
+            />
+
             <Bounds fit clip={false} observe={false} margin={1.1}>
               <Center>
                 <primitive object={modelScene} dispose={null} />
@@ -4077,7 +4108,11 @@ export function GlbViewer() {
                         </div>
 
                         {timelineRows.map((row) => (
-                          <div key={row.key} className="grid grid-cols-[320px_12px_1fr] border-b last:border-b-0">
+                          <div
+                            key={row.key}
+                            className="grid grid-cols-[320px_12px_1fr] border-b last:border-b-0"
+                            style={selectedLayerId === row.layer.id ? { boxShadow: "inset 3px 0 0 hsl(var(--primary))" } : undefined}
+                          >
                             {row.kind === "layer" ? (
                               <div
                                 data-layer-id={row.layer.id}
@@ -4371,7 +4406,9 @@ export function GlbViewer() {
                               )}
                               style={{
                                 backgroundColor:
-                                  row.kind === "layer"
+                                  selectedLayerId === row.layer.id
+                                    ? "hsl(var(--primary) / 0.08)"
+                                    : row.kind === "layer"
                                     ? `rgba(100, 116, 139, ${getDepthShade(row.layer.depth) * 0.85})`
                                     : `rgba(241, 245, 249, ${Math.max(0.12, getDepthShade(row.layer.depth) * 0.22)})`,
                               }}
