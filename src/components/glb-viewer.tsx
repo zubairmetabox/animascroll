@@ -1997,6 +1997,35 @@ export function GlbViewer() {
     controls.update();
   };
 
+  const focusLayer = (layerId: string) => {
+    const object = layerObjectMapRef.current.get(layerId);
+    const camera = cameraRef.current;
+    const controls = orbitControlsRef.current;
+    if (!object || !camera || !controls) return;
+
+    setSelectedLayerId(layerId);
+
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+
+    // Distance to fit the object: half-size / tan(half-fov), with 1.5× padding
+    const fovRad = THREE.MathUtils.degToRad(camera.fov);
+    const distance = (maxDim / 2 / Math.tan(fovRad / 2)) * 1.5;
+
+    // Preserve current viewing direction, just pull back to fitting distance
+    const direction = new THREE.Vector3()
+      .subVectors(camera.position, controls.target)
+      .normalize();
+
+    camera.position.copy(center).addScaledVector(direction, distance);
+    controls.target.copy(center);
+    controls.update();
+  };
+
   const selectLayer = (layerId: string) => {
     if (!layerObjectMapRef.current.get(layerId)) {
       setSelectedLayerId(null);
@@ -4839,6 +4868,17 @@ export function GlbViewer() {
             style={{ left: layerContextMenu.x, top: layerContextMenu.y }}
             onPointerDown={(event) => event.stopPropagation()}
           >
+            <button
+              type="button"
+              className="w-full rounded-sm px-2 py-1.5 text-left text-sm text-foreground hover:bg-muted"
+              onClick={() => {
+                focusLayer(layerContextMenu.layerId);
+                setLayerContextMenu(null);
+              }}
+            >
+              Focus
+            </button>
+            <div className="my-1 border-t border-border" />
             {canGroup && (
               <>
                 <button
