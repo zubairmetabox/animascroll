@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { Bounds, Center, OrbitControls, PerspectiveCamera, TransformControls } from "@react-three/drei";
 import { EffectComposer, Outline } from "@react-three/postprocessing";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -1011,6 +1011,11 @@ export function GlbViewer() {
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
   const [layerItems, setLayerItems] = useState<LayerItem[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  // Isolation stack: array of group UUIDs from outermost to deepest.
+  // Empty = at scene root. Last entry = the group currently being edited inside.
+  const [isolationStack, setIsolationStack] = useState<string[]>([]);
+  const isolationStackRef = useRef<string[]>([]);
+  isolationStackRef.current = isolationStack; // mirror — always fresh in event handlers
   const [layerContextMenu, setLayerContextMenu] = useState<{
     layerId: string;
     x: number;
@@ -2000,6 +2005,52 @@ export function GlbViewer() {
     setSelectedLayerId(layerId);
   };
 
+  // Given the nearest intersected Three.js object from an R3F click event,
+  // walk up the parent chain to find the direct child of the current
+  // isolation context root. Returns its UUID, or null if not selectable.
+  const resolveClickedLayer = (clickedObject: THREE.Object3D): string | null => {
+    if (!modelScene) return null;
+    const contextId = isolationStackRef.current[isolationStackRef.current.length - 1] ?? null;
+    const contextRoot: THREE.Object3D = contextId
+      ? (layerObjectMapRef.current.get(contextId) ?? modelScene)
+      : modelScene;
+
+    let target: THREE.Object3D = clickedObject;
+    while (target.parent && target.parent !== contextRoot) {
+      target = target.parent;
+    }
+    if (target.parent !== contextRoot) return null;
+    if (!isTransformableLayer(target)) return null;
+    if (deletedLayerIdsRef.current.has(target.uuid)) return null;
+    if (!layerObjectMapRef.current.has(target.uuid)) return null;
+    return target.uuid;
+  };
+
+  const handleMeshClick = (event: ThreeEvent<MouseEvent>) => {
+    event.stopPropagation();
+    const id = resolveClickedLayer(event.object);
+    if (id) selectLayer(id);
+  };
+
+  const handleMeshDoubleClick = (event: ThreeEvent<MouseEvent>) => {
+    event.stopPropagation();
+    const id = resolveClickedLayer(event.object);
+    if (!id) return;
+    const obj = layerObjectMapRef.current.get(id);
+    if (!obj) return;
+    // Enter isolation only if the group contains transformable children
+    if (!obj.children.some(isTransformableLayer)) return;
+    setIsolationStack((prev) => [...prev, id]);
+    setSelectedLayerId(null);
+  };
+
+  const handleCanvasPointerMissed = () => {
+    if (isolationStackRef.current.length > 0) {
+      setIsolationStack((prev) => prev.slice(0, -1));
+    }
+    setSelectedLayerId(null);
+  };
+
   const loadFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".glb")) {
       setErrorMessage("Please choose a valid .glb file.");
@@ -2032,6 +2083,7 @@ export function GlbViewer() {
           setLayerItems(items);
           layerObjectMapRef.current = objectMap;
           setSelectedLayerId(null);
+          setIsolationStack([]);
           setRenamingLayerId(null);
           setRenameValue("");
           setLayerDetailsOpen({});
@@ -2478,6 +2530,7 @@ export function GlbViewer() {
     setHistoryIndex(index);
     applyLayerSnapshot(entry.snapshot);
     setAnimationTracks(entry.tracks ?? []);
+    setIsolationStack([]);
   };
 
   const undoLayerChange = () => {
@@ -2502,6 +2555,7 @@ export function GlbViewer() {
     if (!hasModel) return;
     setIsPlaying(false);
     setMoveToolActive(false);
+    setIsolationStack([]);
     if (pinnedCameraView) applyCameraView(pinnedCameraView);
     setViewMode("preview");
   };
@@ -2534,9 +2588,13 @@ export function GlbViewer() {
       const key = event.key.toLowerCase();
       const mod = event.ctrlKey || event.metaKey;
 
-      if (key === "escape" && viewMode === "preview") {
-        exitPreviewMode();
-        return;
+      if (key === "escape") {
+        if (isolationStackRef.current.length > 0) {
+          setIsolationStack((prev) => prev.slice(0, -1));
+          setSelectedLayerId(null);
+          return;
+        }
+        if (viewMode === "preview") { exitPreviewMode(); return; }
       }
 
       if (key === " " && viewMode === "animate") {
@@ -2700,6 +2758,10 @@ export function GlbViewer() {
     if (selectedLayerId && idsToDelete.includes(selectedLayerId)) {
       setSelectedLayerId(null);
     }
+    setIsolationStack((prev) => {
+      const next = prev.filter((id) => !idsToDelete.includes(id));
+      return next.length !== prev.length ? next : prev;
+    });
     if (renamingLayerId && idsToDelete.includes(renamingLayerId)) {
       setRenamingLayerId(null);
       setRenameValue("");
@@ -2758,6 +2820,7 @@ export function GlbViewer() {
     const layerItem = layerItemsRef.current.find((l) => l.id === layerId);
     if (!layerItem || layerItem.parentId === null) return;
     modelScene.attach(obj);
+    setIsolationStack((prev) => prev.filter((id) => id !== layerId));
     const { items, objectMap } = getLayerItems(modelScene);
     setLayerItems(items);
     layerObjectMapRef.current = objectMap;
@@ -3414,7 +3477,8 @@ export function GlbViewer() {
     >
       <div className="absolute inset-0">
         {hasModel ? (
-          <Canvas>
+          <>
+          <Canvas onPointerMissed={viewMode === "animate" ? handleCanvasPointerMissed : undefined}>
             <PerspectiveCamera
               ref={cameraRef}
               makeDefault
@@ -3480,7 +3544,12 @@ export function GlbViewer() {
 
             <Bounds fit clip={false} observe={false} margin={1.1}>
               <Center>
-                <primitive object={modelScene} dispose={null} />
+                <primitive
+                  object={modelScene}
+                  dispose={null}
+                  onClick={viewMode === "animate" ? handleMeshClick : undefined}
+                  onDoubleClick={viewMode === "animate" ? handleMeshDoubleClick : undefined}
+                />
               </Center>
             </Bounds>
             <OrbitControls
@@ -3497,6 +3566,55 @@ export function GlbViewer() {
               autoRotate={viewMode !== "preview" && settings.orbitAutoRotate}
             />
           </Canvas>
+
+          {/* ── Isolation breadcrumb bar ─────────────────────────────────────────── */}
+          {hasModel && viewMode === "animate" && isolationStack.length > 0 ? (
+            <div
+              className="pointer-events-auto absolute left-1/2 top-3 z-[55] -translate-x-1/2
+                         flex items-center gap-1 rounded-lg border border-border/40
+                         bg-card/90 px-3 py-1.5 text-xs backdrop-blur-sm"
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="text-muted-foreground transition-colors hover:text-foreground"
+                onClick={() => { setIsolationStack([]); setSelectedLayerId(null); }}
+              >
+                Scene
+              </button>
+              {isolationStack.map((id, index) => {
+                const isLast = index === isolationStack.length - 1;
+                return (
+                  <span key={id} className="flex items-center gap-1">
+                    <ChevronRight className="h-3 w-3 text-muted-foreground/50" />
+                    {isLast ? (
+                      <span className="font-medium text-foreground">{getLayerName(id)}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="text-muted-foreground transition-colors hover:text-foreground"
+                        onClick={() => {
+                          setIsolationStack((prev) => prev.slice(0, index + 1));
+                          setSelectedLayerId(null);
+                        }}
+                      >
+                        {getLayerName(id)}
+                      </button>
+                    )}
+                  </span>
+                );
+              })}
+              <button
+                type="button"
+                className="ml-2 text-muted-foreground/50 transition-colors hover:text-foreground"
+                title="Exit isolation (Escape)"
+                onClick={() => { setIsolationStack([]); setSelectedLayerId(null); }}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+          </>
         ) : (
           <div className="h-full bg-[#0b0f13]" />
         )}
