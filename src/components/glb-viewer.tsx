@@ -3532,12 +3532,6 @@ export function GlbViewer() {
                 onDragEnd={() => {
                   if (!selectedLayerId) return;
                   commitLayerTransform(selectedLayerId);
-                  const layer = layerItemsRef.current.find((l) => l.id === selectedLayerId);
-                  if (layer) {
-                    upsertKeyframeAtCurrentTimeRef.current(layer, "position.x", false);
-                    upsertKeyframeAtCurrentTimeRef.current(layer, "position.y", false);
-                    upsertKeyframeAtCurrentTimeRef.current(layer, "position.z", false);
-                  }
                 }}
               />
             )}
