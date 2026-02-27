@@ -498,7 +498,6 @@ function MoveGizmo({
   onDragMove: () => void;
   onDragEnd: () => void;
 }) {
-  // Keep callbacks in refs so R3F prop closures are always fresh
   const startRef = useRef(onDragStart);
   const moveRef  = useRef(onDragMove);
   const endRef   = useRef(onDragEnd);
@@ -506,16 +505,58 @@ function MoveGizmo({
   moveRef.current  = onDragMove;
   endRef.current   = onDragEnd;
 
+  // Pivot: a dummy group positioned at the object's bounding-box centre.
+  // TransformControls attaches to this so the gizmo always appears on the mesh.
+  const [pivot, setPivot] = useState<THREE.Group | null>(null);
+  const isDragging           = useRef(false);
+  const pivotStartPos        = useRef(new THREE.Vector3());
+  const objStartWorldPos     = useRef(new THREE.Vector3()); // world-space origin at drag start
+
+  // Keep pivot centred on the object while idle
+  useFrame(() => {
+    if (!pivot || !object || isDragging.current) return;
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) object.getWorldPosition(pivot.position);
+    else               box.getCenter(pivot.position);
+  });
+
   if (!object) return null;
 
   return (
-    <TransformControls
-      object={object}
-      mode="translate"
-      onMouseDown={() => startRef.current()}
-      onChange={() => moveRef.current()}
-      onMouseUp={() => endRef.current()}
-    />
+    <>
+      {/* Invisible pivot group — lives in world space */}
+      <group ref={setPivot} />
+
+      {pivot && (
+        <TransformControls
+          object={pivot}
+          mode="translate"
+          onMouseDown={() => {
+            isDragging.current = true;
+            pivotStartPos.current.copy(pivot.position);
+            object.getWorldPosition(objStartWorldPos.current);
+            startRef.current();
+          }}
+          onChange={() => {
+            if (!isDragging.current) return;
+            // World-space delta → convert target world pos to object's local space
+            const worldDelta = new THREE.Vector3().subVectors(pivot.position, pivotStartPos.current);
+            const targetWorld = objStartWorldPos.current.clone().add(worldDelta);
+            if (object.parent) {
+              object.position.copy(object.parent.worldToLocal(targetWorld));
+            } else {
+              object.position.copy(targetWorld);
+            }
+            object.updateMatrixWorld();
+            moveRef.current();
+          }}
+          onMouseUp={() => {
+            isDragging.current = false;
+            endRef.current();
+          }}
+        />
+      )}
+    </>
   );
 }
 
