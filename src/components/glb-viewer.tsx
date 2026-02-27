@@ -501,11 +501,13 @@ function SceneGrid({
 
 function MoveGizmo({
   object,
+  otherObjects,
   onDragStart,
   onDragMove,
   onDragEnd,
 }: {
   object: THREE.Object3D | null;
+  otherObjects: THREE.Object3D[];
   onDragStart: () => void;
   onDragMove: () => void;
   onDragEnd: () => void;
@@ -525,6 +527,16 @@ function MoveGizmo({
   const isDragging           = useRef(false);
   const pivotStartPos        = useRef(new THREE.Vector3());
   const objStartWorldPos     = useRef(new THREE.Vector3()); // world-space origin at drag start
+
+  // Ctrl key tracking — hold Ctrl while dragging to enable bbox-edge snapping
+  const isCtrlHeld = useRef(false);
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => { if (e.key === "Control") isCtrlHeld.current = true; };
+    const up   = (e: KeyboardEvent) => { if (e.key === "Control") isCtrlHeld.current = false; };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup",   up);
+    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+  }, []);
 
   // Keep pivot centred on the object while idle
   useFrame(() => {
@@ -562,6 +574,59 @@ function MoveGizmo({
               object.position.copy(targetWorld);
             }
             object.updateMatrixWorld();
+
+            // Ctrl + drag → bbox-edge snap against all other layers
+            if (isCtrlHeld.current && otherObjects.length > 0) {
+              const movingBox = new THREE.Box3().setFromObject(object);
+              const SNAP_THRESHOLD = 0.2;
+              let snapX = 0, snapY = 0, snapZ = 0;
+              let bestX = SNAP_THRESHOLD, bestY = SNAP_THRESHOLD, bestZ = SNAP_THRESHOLD;
+
+              for (const other of otherObjects) {
+                const ob = new THREE.Box3().setFromObject(other);
+                if (ob.isEmpty()) continue;
+
+                // X axis — test all four edge-pair alignments
+                for (const diff of [
+                  movingBox.min.x - ob.min.x, movingBox.min.x - ob.max.x,
+                  movingBox.max.x - ob.min.x, movingBox.max.x - ob.max.x,
+                ]) {
+                  const abs = Math.abs(diff);
+                  if (abs < bestX) { bestX = abs; snapX = -diff; }
+                }
+                // Y axis
+                for (const diff of [
+                  movingBox.min.y - ob.min.y, movingBox.min.y - ob.max.y,
+                  movingBox.max.y - ob.min.y, movingBox.max.y - ob.max.y,
+                ]) {
+                  const abs = Math.abs(diff);
+                  if (abs < bestY) { bestY = abs; snapY = -diff; }
+                }
+                // Z axis
+                for (const diff of [
+                  movingBox.min.z - ob.min.z, movingBox.min.z - ob.max.z,
+                  movingBox.max.z - ob.min.z, movingBox.max.z - ob.max.z,
+                ]) {
+                  const abs = Math.abs(diff);
+                  if (abs < bestZ) { bestZ = abs; snapZ = -diff; }
+                }
+              }
+
+              if (snapX !== 0 || snapY !== 0 || snapZ !== 0) {
+                const worldPos = new THREE.Vector3();
+                object.getWorldPosition(worldPos);
+                worldPos.x += snapX;
+                worldPos.y += snapY;
+                worldPos.z += snapZ;
+                if (object.parent) {
+                  object.position.copy(object.parent.worldToLocal(worldPos));
+                } else {
+                  object.position.copy(worldPos);
+                }
+                object.updateMatrixWorld();
+              }
+            }
+
             moveRef.current();
           }}
           onMouseUp={() => {
@@ -3462,6 +3527,13 @@ export function GlbViewer() {
             {moveToolActive && viewMode === "animate" && (
               <MoveGizmo
                 object={selectedLayerId ? (layerObjectMapRef.current.get(selectedLayerId) ?? null) : null}
+                otherObjects={
+                  selectedLayerId
+                    ? Array.from(layerObjectMapRef.current.values()).filter(
+                        (o) => o !== layerObjectMapRef.current.get(selectedLayerId)
+                      )
+                    : []
+                }
                 onDragStart={() => {
                   if (selectedLayerId) beginLayerTransform(selectedLayerId);
                 }}
