@@ -7,8 +7,8 @@
 Ship in small, safe increments. Each phase must be fully stable before moving to the next.
 
 ## Current Status
-- Phases 1–10: Completed
-- Next: Phase 11 (UX Polish + Hardening)
+- Phases 1–14: Completed
+- Next: Phase 15 (Multi-Format File Upload)
 
 ---
 
@@ -155,7 +155,65 @@ Ship in small, safe increments. Each phase must be fully stable before moving to
 
 ---
 
-## Phase 11: UX Polish + Hardening
+## Phase 11: Camera + Export UX ✅
+- Navigate mode removed; orbit available directly in Animate mode.
+- **Set Preview Camera** button saves current view; companion **↺** button jumps back to saved angle.
+- HTML export: model correctly centred at world origin (matches `<Center>` in editor), `camera.zoom` and `near`/`far` clipping exported.
+- Outline highlight on selected layer via postprocessing.
+
+---
+
+## Phase 12: Move Tool ✅
+- Translate gizmo attached to bounding-box centre; handles parent transforms correctly.
+- `G` key toggles; toolbar button with active state.
+- Drag repositions object, commits to undo history — **no automatic keyframes**.
+- Keyframes created only by explicit ◆ button click in the timeline.
+
+---
+
+## Phase 13: Snap (reverted)
+- Ctrl+drag bbox-edge snapping was attempted (multiple visual approaches) but removed due to accuracy and UX issues.
+
+---
+
+## Phase 14: Viewport Click-to-Select + Isolation Mode ✅
+- **Click** any mesh in the 3D viewport → selects its layer (timeline + panel highlight).
+- **Double-click** a group → enters isolation mode; context shifts to that group.
+- **Breadcrumb bar** at top-centre: `Scene › GroupName` — clickable ancestors navigate back; × exits.
+- **Click empty canvas** → deselects and pops one isolation level.
+- **Escape** pops one isolation level (before exiting preview mode).
+- Orbit drag does not trigger selection.
+- Isolation stack cleared on: model load, preview mode, delete, ungroup, history jump.
+
+---
+
+## Phase 15: Multi-Format File Upload
+### Scope
+Support `.glb`, `.gltf`, `.fbx`, `.obj`, `.stl` via the existing upload UI. All loaders ship in `three@0.182.0` — no new npm packages required.
+
+| Format | Loader | Notes |
+|--------|--------|-------|
+| `.glb` | `GLTFLoader` (already used) | unchanged |
+| `.gltf` | `GLTFLoader` | text-based; embedded data works, external `.bin` refs do not |
+| `.fbx` | `FBXLoader` (dynamic import) | supports hierarchy + animation skeleton |
+| `.obj` | `OBJLoader` (dynamic import) | static mesh only |
+| `.stl` | `STLLoader` (dynamic import) | single mesh, neutral grey material |
+
+### Key Changes
+- `loadFile`: replace GLTFLoader-only callback block with an `ext`-based dispatcher; wrap GLTFLoader in `Promise` for consistency.
+- STL: `BufferGeometry` wrapped in `Mesh` + `Group` so layer system works identically.
+- File input `accept=".glb,.gltf,.fbx,.obj,.stl"`.
+- Button label: "Select 3D file"; drop zone hint updated with supported extensions.
+- Error message if unsupported extension dropped.
+
+### Exit Criteria
+- All five formats load and show layers in the panel.
+- Unsupported files show a clear error message.
+- GLB workflow unchanged.
+
+---
+
+## Phase 16: UX Polish + Hardening (formerly Phase 11)
 ### Scope
 - Keyframe tooltip on hover: `atVh` + value + easing.
 - `J` / `L` step playhead ±1 vh; `K` toggles play/pause.
@@ -168,7 +226,7 @@ Ship in small, safe increments. Each phase must be fully stable before moving to
 
 ---
 
-## Phase 12: Export v2 Investigation (Optional)
+## Phase 17: Export v2 Investigation (Optional)
 ### Scope
 - Feasibility study: bake timeline into `.glb` animation clips.
 - Go/no-go based on complexity and property coverage.
