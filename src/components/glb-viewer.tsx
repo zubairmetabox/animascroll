@@ -500,16 +500,6 @@ function SceneGrid({
 }
 
 // Renders an orange wireframe box around a snap target while snapping is active.
-function SnapBoxHelper({ object }: { object: THREE.Object3D }) {
-  const helper = useMemo(
-    () => new THREE.BoxHelper(object, new THREE.Color(0xff8c00)),
-    [object]
-  );
-  useEffect(() => () => { helper.geometry.dispose(); }, [helper]);
-  useFrame(() => { helper.update(); });
-  return <primitive object={helper} />;
-}
-
 function MoveGizmo({
   object,
   otherObjects,
@@ -549,16 +539,27 @@ function MoveGizmo({
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, []);
 
-  // Snap visual state — objects currently being snapped to (shown as orange wireframe boxes)
-  const prevSnapKeyRef = useRef("");
-  const [snapTargets, setSnapTargets] = useState<THREE.Object3D[]>([]);
+  // Snap dot — ref-based, no React re-renders during drag
+  const snapDotPosRef  = useRef<THREE.Vector3 | null>(null);
+  const snapDotMeshRef = useRef<THREE.Mesh | null>(null);
 
-  // Keep pivot centred on the object while idle
-  useFrame(() => {
-    if (!pivot || !object || isDragging.current) return;
-    const box = new THREE.Box3().setFromObject(object);
-    if (box.isEmpty()) object.getWorldPosition(pivot.position);
-    else               box.getCenter(pivot.position);
+  // Keep pivot centred on the object while idle; update snap dot each frame
+  useFrame(({ camera }) => {
+    if (pivot && object && !isDragging.current) {
+      const box = new THREE.Box3().setFromObject(object);
+      if (box.isEmpty()) object.getWorldPosition(pivot.position);
+      else               box.getCenter(pivot.position);
+    }
+    if (snapDotMeshRef.current) {
+      if (snapDotPosRef.current && isDragging.current) {
+        snapDotMeshRef.current.position.copy(snapDotPosRef.current);
+        const dist = camera.position.distanceTo(snapDotMeshRef.current.position);
+        snapDotMeshRef.current.scale.setScalar(dist * 0.012);
+        snapDotMeshRef.current.visible = true;
+      } else {
+        snapDotMeshRef.current.visible = false;
+      }
+    }
   });
 
   if (!object) return null;
@@ -568,10 +569,11 @@ function MoveGizmo({
       {/* Invisible pivot group — lives in world space */}
       <group ref={setPivot} />
 
-      {/* Orange wireframe box on snap target(s) while Ctrl+drag snapping is active */}
-      {snapTargets.map((target) => (
-        <SnapBoxHelper key={target.uuid} object={target} />
-      ))}
+      {/* Small orange dot at the moving object's centre while Ctrl+drag snapping is active */}
+      <mesh ref={snapDotMeshRef} visible={false} renderOrder={999}>
+        <sphereGeometry args={[1, 8, 8]} />
+        <meshBasicMaterial color={0xff8c00} depthTest={false} />
+      </mesh>
 
       {pivot && (
         <TransformControls
@@ -601,9 +603,6 @@ function MoveGizmo({
               const SNAP_THRESHOLD = 0.3;
               let snapX = 0, snapY = 0, snapZ = 0;
               let bestX = SNAP_THRESHOLD, bestY = SNAP_THRESHOLD, bestZ = SNAP_THRESHOLD;
-              let winnerX: THREE.Object3D | null = null;
-              let winnerY: THREE.Object3D | null = null;
-              let winnerZ: THREE.Object3D | null = null;
 
               for (const other of otherObjects) {
                 const ob = new THREE.Box3().setFromObject(other);
@@ -615,7 +614,7 @@ function MoveGizmo({
                   movingBox.max.x - ob.min.x, movingBox.max.x - ob.max.x,
                 ]) {
                   const abs = Math.abs(diff);
-                  if (abs < bestX) { bestX = abs; snapX = -diff; winnerX = other; }
+                  if (abs < bestX) { bestX = abs; snapX = -diff; }
                 }
                 // Y axis
                 for (const diff of [
@@ -623,7 +622,7 @@ function MoveGizmo({
                   movingBox.max.y - ob.min.y, movingBox.max.y - ob.max.y,
                 ]) {
                   const abs = Math.abs(diff);
-                  if (abs < bestY) { bestY = abs; snapY = -diff; winnerY = other; }
+                  if (abs < bestY) { bestY = abs; snapY = -diff; }
                 }
                 // Z axis
                 for (const diff of [
@@ -631,16 +630,8 @@ function MoveGizmo({
                   movingBox.max.z - ob.min.z, movingBox.max.z - ob.max.z,
                 ]) {
                   const abs = Math.abs(diff);
-                  if (abs < bestZ) { bestZ = abs; snapZ = -diff; winnerZ = other; }
+                  if (abs < bestZ) { bestZ = abs; snapZ = -diff; }
                 }
-              }
-
-              // Update orange wireframe visuals only when the snapping target changes
-              const newTargets = [...new Set([winnerX, winnerY, winnerZ].filter(Boolean))] as THREE.Object3D[];
-              const newKey = newTargets.map((o) => o.uuid).sort().join(",");
-              if (newKey !== prevSnapKeyRef.current) {
-                prevSnapKeyRef.current = newKey;
-                setSnapTargets(newTargets);
               }
 
               if (snapX !== 0 || snapY !== 0 || snapZ !== 0) {
@@ -655,21 +646,23 @@ function MoveGizmo({
                   object.position.copy(worldPos);
                 }
                 object.updateMatrixWorld();
+                // Show snap dot at bbox centre of the (now snapped) moving object
+                const dotBox = new THREE.Box3().setFromObject(object);
+                if (!snapDotPosRef.current) snapDotPosRef.current = new THREE.Vector3();
+                dotBox.getCenter(snapDotPosRef.current);
+              } else {
+                snapDotPosRef.current = null;
               }
             } else {
-              // Ctrl released — clear snap visuals
-              if (prevSnapKeyRef.current !== "") {
-                prevSnapKeyRef.current = "";
-                setSnapTargets([]);
-              }
+              // Ctrl released — hide snap dot
+              snapDotPosRef.current = null;
             }
 
             moveRef.current();
           }}
           onMouseUp={() => {
             isDragging.current = false;
-            prevSnapKeyRef.current = "";
-            setSnapTargets([]);
+            snapDotPosRef.current = null;
             endRef.current();
           }}
         />
