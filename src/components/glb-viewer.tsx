@@ -146,7 +146,7 @@ type AnimationTrack = {
   keyframes: AnimationKeyframe[];
 };
 
-type ViewMode = "navigate" | "animate" | "preview";
+type ViewMode = "animate" | "preview";
 
 type CameraView = {
   position: [number, number, number];
@@ -984,7 +984,6 @@ export function GlbViewer() {
   const [timelineProgress, setTimelineProgress] = useState(0);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [hasMovedInNavigate, setHasMovedInNavigate] = useState(false);
   const [timelineExpandedLayerIds, setTimelineExpandedLayerIds] = useState<Set<string>>(new Set());
   const [timelinePanelHeight, setTimelinePanelHeight] = useState(260);
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
@@ -1206,14 +1205,14 @@ export function GlbViewer() {
     return object?.name?.trim() || "Layer";
   };
 
-  // Re-apply pinned camera view in animate mode whenever it changes (e.g. after JSON load).
+  // Re-apply pinned camera view when it changes (e.g. after JSON load).
   // Using requestAnimationFrame ensures we run after Bounds' fit animation frame.
   useEffect(() => {
-    if (!hasModel || !pinnedCameraView || viewMode !== "animate") return;
+    if (!hasModel || !pinnedCameraView) return;
     const id = requestAnimationFrame(() => applyCameraView(pinnedCameraView));
     return () => cancelAnimationFrame(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinnedCameraView, hasModel, viewMode]);
+  }, [pinnedCameraView, hasModel]);
 
   useEffect(() => {
     if (!hasUnsavedChanges) return;
@@ -2485,9 +2484,6 @@ export function GlbViewer() {
   };
 
   const enterAnimateMode = () => {
-    if (pinnedCameraView) {
-      applyCameraView(pinnedCameraView);
-    }
     setViewMode("animate");
   };
 
@@ -2495,29 +2491,12 @@ export function GlbViewer() {
     if (!hasModel) return;
     setIsPlaying(false);
     setMoveToolActive(false);
+    if (pinnedCameraView) applyCameraView(pinnedCameraView);
     setViewMode("preview");
   };
 
   const exitPreviewMode = () => {
     setViewMode("animate");
-  };
-
-  const enterNavigateMode = () => {
-    if (viewMode === "navigate") return; // already here — don't re-capture or reset
-    // Capture the camera exactly as the user sees it now — Bounds fly-in is long done at this point
-    const controls = orbitControlsRef.current;
-    const camera = cameraRef.current;
-    if (controls && camera) {
-      setPinnedCameraView({
-        position: [camera.position.x, camera.position.y, camera.position.z],
-        target: [controls.target.x, controls.target.y, controls.target.z],
-        fov: camera.fov,
-        zoom: camera.zoom,
-      });
-    }
-    setHasMovedInNavigate(false);
-    setMoveToolActive(false);
-    setViewMode("navigate");
   };
 
   useEffect(() => {
@@ -3456,7 +3435,7 @@ export function GlbViewer() {
             )}
 
             <SceneGrid
-              show={settings.showGrid && viewMode === "navigate"}
+              show={settings.showGrid && viewMode !== "preview"}
               size={20}
               divisions={20}
               fadeDistance={30}
@@ -3496,16 +3475,15 @@ export function GlbViewer() {
             <OrbitControls
               ref={orbitControlsRef}
               makeDefault
-              enableDamping={viewMode === "navigate"}
+              enableDamping
               dampingFactor={0.1}
               minDistance={0.02}
               maxDistance={100000}
-              enabled={viewMode === "navigate"}
-              enableRotate={viewMode === "navigate"}
-              enablePan={viewMode === "navigate"}
-              enableZoom={viewMode === "navigate" && settings.orbitEnableZoom}
-              autoRotate={viewMode === "navigate" && settings.orbitAutoRotate}
-              onChange={() => { if (viewMode === "navigate") setHasMovedInNavigate(true); }}
+              enabled={viewMode !== "preview"}
+              enableRotate={viewMode !== "preview"}
+              enablePan={viewMode !== "preview"}
+              enableZoom={viewMode !== "preview" && settings.orbitEnableZoom}
+              autoRotate={viewMode !== "preview" && settings.orbitAutoRotate}
             />
           </Canvas>
         ) : (
@@ -3721,12 +3699,20 @@ export function GlbViewer() {
           className="absolute right-4 top-3 z-50 flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          {viewMode === "navigate" ? (
+          {viewMode === "animate" ? (
             <Button
               size="sm"
-              variant="outline"
-              disabled={!hasMovedInNavigate}
-              className="border-primary/50 text-primary hover:bg-primary/10 disabled:opacity-40"
+              variant={pinnedCameraView ? "outline" : "secondary"}
+              className={
+                pinnedCameraView
+                  ? "border-primary/50 text-primary hover:bg-primary/10"
+                  : "text-muted-foreground"
+              }
+              title={
+                pinnedCameraView
+                  ? "Preview camera saved — click to update"
+                  : "Save current view as preview camera"
+              }
               onClick={() => {
                 const controls = orbitControlsRef.current;
                 const camera = cameraRef.current;
@@ -3737,19 +3723,15 @@ export function GlbViewer() {
                   fov: camera.fov,
                   zoom: camera.zoom,
                 });
-                setHasMovedInNavigate(false);
               }}
             >
-              Pin View
+              <Camera className="mr-1.5 h-3.5 w-3.5" />
+              {pinnedCameraView ? "Preview Camera ✓" : "Set Preview Camera"}
             </Button>
           ) : null}
-          <Button
-            size="sm"
-            variant={viewMode === "navigate" ? "default" : "secondary"}
-            onClick={enterNavigateMode}
-          >
-            Navigate
-          </Button>
+          {viewMode === "animate" ? (
+            <div className="mx-0.5 h-4 w-px bg-border/60" />
+          ) : null}
           <Button
             size="sm"
             variant={viewMode === "animate" ? "default" : "secondary"}
@@ -3761,6 +3743,7 @@ export function GlbViewer() {
             size="sm"
             variant="secondary"
             className="text-muted-foreground hover:text-foreground"
+            disabled={!hasModel}
             onClick={enterPreviewMode}
           >
             Preview
