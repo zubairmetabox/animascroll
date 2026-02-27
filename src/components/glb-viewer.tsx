@@ -2005,6 +2005,13 @@ export function GlbViewer() {
     setSelectedLayerId(layerId);
   };
 
+  // Scroll the timeline row into view whenever the selected layer changes
+  useEffect(() => {
+    if (!selectedLayerId) return;
+    const el = document.querySelector<HTMLElement>(`[data-layer-id="${selectedLayerId}"]`);
+    if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [selectedLayerId]);
+
   // Given the nearest intersected Three.js object from an R3F click event,
   // walk up the parent chain to find the direct child of the current
   // isolation context root. Returns its UUID, or null if not selectable.
