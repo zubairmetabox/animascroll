@@ -523,42 +523,30 @@ function MoveGizmo({
   });
 
   // Pivot: a dummy group positioned at the object's bounding-box centre.
-  // TransformControls attaches to this so the gizmo always appears on the mesh.
   const [pivot, setPivot] = useState<THREE.Group | null>(null);
-  const isDragging           = useRef(false);
-  const pivotStartPos        = useRef(new THREE.Vector3());
-  const objStartWorldPos     = useRef(new THREE.Vector3()); // world-space origin at drag start
+  const isDragging       = useRef(false);
+  const pivotStartPos    = useRef(new THREE.Vector3());
+  const objStartWorldPos = useRef(new THREE.Vector3());
 
-  // Ctrl key tracking — hold Ctrl while dragging to enable bbox-edge snapping
-  const isCtrlHeld = useRef(false);
-  useEffect(() => {
-    const down = (e: KeyboardEvent) => { if (e.key === "Control") isCtrlHeld.current = true; };
-    const up   = (e: KeyboardEvent) => { if (e.key === "Control") isCtrlHeld.current = false; };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup",   up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, []);
+  // Snap dot — state controls mount/unmount; refs control position each frame.
+  // snapActiveRef mirrors state so onChange can read it without stale closure.
+  const [snapActive, setSnapActive] = useState(false);
+  const snapActiveRef  = useRef(false);
+  const snapDotPosRef  = useRef(new THREE.Vector3());
+  const snapDotMeshRef = useRef<THREE.Mesh>(null);
 
-  // Snap dot — ref-based, no React re-renders during drag
-  const snapDotPosRef  = useRef<THREE.Vector3 | null>(null);
-  const snapDotMeshRef = useRef<THREE.Mesh | null>(null);
-
-  // Keep pivot centred on the object while idle; update snap dot each frame
   useFrame(({ camera }) => {
+    // Keep pivot at bbox centre while idle
     if (pivot && object && !isDragging.current) {
       const box = new THREE.Box3().setFromObject(object);
       if (box.isEmpty()) object.getWorldPosition(pivot.position);
       else               box.getCenter(pivot.position);
     }
+    // Reposition + scale the snap dot every frame while it's mounted
     if (snapDotMeshRef.current) {
-      if (snapDotPosRef.current && isDragging.current) {
-        snapDotMeshRef.current.position.copy(snapDotPosRef.current);
-        const dist = camera.position.distanceTo(snapDotMeshRef.current.position);
-        snapDotMeshRef.current.scale.setScalar(dist * 0.012);
-        snapDotMeshRef.current.visible = true;
-      } else {
-        snapDotMeshRef.current.visible = false;
-      }
+      snapDotMeshRef.current.position.copy(snapDotPosRef.current);
+      const dist = camera.position.distanceTo(snapDotMeshRef.current.position);
+      snapDotMeshRef.current.scale.setScalar(Math.max(0.01, dist * 0.014));
     }
   });
 
@@ -569,11 +557,13 @@ function MoveGizmo({
       {/* Invisible pivot group — lives in world space */}
       <group ref={setPivot} />
 
-      {/* Small orange dot at the moving object's centre while Ctrl+drag snapping is active */}
-      <mesh ref={snapDotMeshRef} visible={false} renderOrder={999}>
-        <sphereGeometry args={[1, 8, 8]} />
-        <meshBasicMaterial color={0xff8c00} depthTest={false} />
-      </mesh>
+      {/* Orange snap dot — mounted only while snapping is active */}
+      {snapActive && (
+        <mesh ref={snapDotMeshRef} renderOrder={999}>
+          <sphereGeometry args={[1, 8, 8]} />
+          <meshBasicMaterial color={0xff8c00} depthTest={false} />
+        </mesh>
+      )}
 
       {pivot && (
         <TransformControls
@@ -587,7 +577,8 @@ function MoveGizmo({
           }}
           onChange={() => {
             if (!isDragging.current) return;
-            // World-space delta → convert target world pos to object's local space
+
+            // Apply free-drag: world-space delta → object local space
             const worldDelta = new THREE.Vector3().subVectors(pivot.position, pivotStartPos.current);
             const targetWorld = objStartWorldPos.current.clone().add(worldDelta);
             if (object.parent) {
@@ -597,10 +588,15 @@ function MoveGizmo({
             }
             object.updateMatrixWorld();
 
-            // Ctrl + drag → bbox-edge snap against all other layers
-            if (isCtrlHeld.current && otherObjects.length > 0) {
+            // Always-on bbox-edge snap against all other layers
+            let snapped = false;
+            if (otherObjects.length > 0) {
               const movingBox = new THREE.Box3().setFromObject(object);
-              const SNAP_THRESHOLD = 0.3;
+              // Adaptive threshold: 4% of moving bbox diagonal, clamped [0.1, 2.0]
+              const sz = new THREE.Vector3();
+              movingBox.getSize(sz);
+              const SNAP_THRESHOLD = Math.min(2.0, Math.max(0.1, sz.length() * 0.04));
+
               let snapX = 0, snapY = 0, snapZ = 0;
               let bestX = SNAP_THRESHOLD, bestY = SNAP_THRESHOLD, bestZ = SNAP_THRESHOLD;
 
@@ -608,33 +604,27 @@ function MoveGizmo({
                 const ob = new THREE.Box3().setFromObject(other);
                 if (ob.isEmpty()) continue;
 
-                // X axis — test all four edge-pair alignments
                 for (const diff of [
                   movingBox.min.x - ob.min.x, movingBox.min.x - ob.max.x,
                   movingBox.max.x - ob.min.x, movingBox.max.x - ob.max.x,
                 ]) {
-                  const abs = Math.abs(diff);
-                  if (abs < bestX) { bestX = abs; snapX = -diff; }
+                  if (Math.abs(diff) < bestX) { bestX = Math.abs(diff); snapX = -diff; snapped = true; }
                 }
-                // Y axis
                 for (const diff of [
                   movingBox.min.y - ob.min.y, movingBox.min.y - ob.max.y,
                   movingBox.max.y - ob.min.y, movingBox.max.y - ob.max.y,
                 ]) {
-                  const abs = Math.abs(diff);
-                  if (abs < bestY) { bestY = abs; snapY = -diff; }
+                  if (Math.abs(diff) < bestY) { bestY = Math.abs(diff); snapY = -diff; snapped = true; }
                 }
-                // Z axis
                 for (const diff of [
                   movingBox.min.z - ob.min.z, movingBox.min.z - ob.max.z,
                   movingBox.max.z - ob.min.z, movingBox.max.z - ob.max.z,
                 ]) {
-                  const abs = Math.abs(diff);
-                  if (abs < bestZ) { bestZ = abs; snapZ = -diff; }
+                  if (Math.abs(diff) < bestZ) { bestZ = Math.abs(diff); snapZ = -diff; snapped = true; }
                 }
               }
 
-              if (snapX !== 0 || snapY !== 0 || snapZ !== 0) {
+              if (snapped) {
                 const worldPos = new THREE.Vector3();
                 object.getWorldPosition(worldPos);
                 worldPos.x += snapX;
@@ -646,23 +636,22 @@ function MoveGizmo({
                   object.position.copy(worldPos);
                 }
                 object.updateMatrixWorld();
-                // Show snap dot at bbox centre of the (now snapped) moving object
-                const dotBox = new THREE.Box3().setFromObject(object);
-                if (!snapDotPosRef.current) snapDotPosRef.current = new THREE.Vector3();
-                dotBox.getCenter(snapDotPosRef.current);
-              } else {
-                snapDotPosRef.current = null;
+                // Update dot position at bbox centre of the snapped object
+                new THREE.Box3().setFromObject(object).getCenter(snapDotPosRef.current);
               }
-            } else {
-              // Ctrl released — hide snap dot
-              snapDotPosRef.current = null;
+            }
+
+            // Toggle dot on/off only when snap status changes (avoids re-render spam)
+            if (snapped !== snapActiveRef.current) {
+              snapActiveRef.current = snapped;
+              setSnapActive(snapped);
             }
 
             moveRef.current();
           }}
           onMouseUp={() => {
             isDragging.current = false;
-            snapDotPosRef.current = null;
+            if (snapActiveRef.current) { snapActiveRef.current = false; setSnapActive(false); }
             endRef.current();
           }}
         />
