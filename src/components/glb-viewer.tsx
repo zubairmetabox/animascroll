@@ -91,7 +91,7 @@ type ExportConfig = {
   useAmbientLight: boolean;
   ambientIntensity: number;
   pointLights: { color: string; intensity: number; x: number; y: number; z: number }[];
-  pinnedCamera: { position: [number, number, number]; target: [number, number, number]; fov: number } | null;
+  pinnedCamera: { position: [number, number, number]; target: [number, number, number]; fov: number; zoom: number } | null;
   timelineLengthVh: number;
   tracks: { layerName: string; propertyId: string; keyframes: { atVh: number; value: number; easing: string }[] }[];
 };
@@ -314,13 +314,15 @@ scene.background = new THREE.Color(CFG.backgroundColor);
 
 const camera = new THREE.PerspectiveCamera(
   CFG.pinnedCamera ? CFG.pinnedCamera.fov : 45,
-  window.innerWidth / window.innerHeight, 0.01, 1000
+  window.innerWidth / window.innerHeight, 0.001, 100000
 );
 if (CFG.pinnedCamera) {
   const p = CFG.pinnedCamera.position;
   const t = CFG.pinnedCamera.target;
   camera.position.set(p[0], p[1], p[2]);
   camera.lookAt(new THREE.Vector3(t[0], t[1], t[2]));
+  camera.zoom = CFG.pinnedCamera.zoom != null ? CFG.pinnedCamera.zoom : 1;
+  camera.updateProjectionMatrix();
 }
 
 if (CFG.useAmbientLight) {
@@ -423,6 +425,16 @@ function applyTracks() {
 const loader = new GLTFLoader();
 loader.load(GLB_DATA_URL, function(gltf) {
   scene.add(gltf.scene);
+
+  // Centre at world origin — matches Drei's <Center> in the editor so
+  // the saved camera target [0,0,0] points at the model correctly.
+  var box = new THREE.Box3().setFromObject(gltf.scene);
+  if (!box.isEmpty()) {
+    var center = box.getCenter(new THREE.Vector3());
+    gltf.scene.position.sub(center);
+    gltf.scene.updateMatrixWorld(true);
+  }
+
   gltf.scene.traverse(function(obj) {
     if (obj.name) objMap[obj.name] = obj;
   });
@@ -501,9 +513,11 @@ function MoveGizmo({
   const startRef = useRef(onDragStart);
   const moveRef  = useRef(onDragMove);
   const endRef   = useRef(onDragEnd);
-  startRef.current = onDragStart;
-  moveRef.current  = onDragMove;
-  endRef.current   = onDragEnd;
+  useLayoutEffect(() => {
+    startRef.current = onDragStart;
+    moveRef.current  = onDragMove;
+    endRef.current   = onDragEnd;
+  });
 
   // Pivot: a dummy group positioned at the object's bounding-box centre.
   // TransformControls attaches to this so the gizmo always appears on the mesh.
@@ -2260,7 +2274,7 @@ export function GlbViewer() {
             .filter((l) => l.enabled)
             .map((l) => ({ color: l.color, intensity: l.intensity, x: l.x, y: l.y, z: l.z })),
           pinnedCamera: pinnedCameraView
-            ? { position: pinnedCameraView.position, target: pinnedCameraView.target, fov: pinnedCameraView.fov }
+            ? { position: pinnedCameraView.position, target: pinnedCameraView.target, fov: pinnedCameraView.fov, zoom: pinnedCameraView.zoom }
             : null,
           timelineLengthVh,
           tracks: animationTracks.map((t) => ({
@@ -3708,11 +3722,7 @@ export function GlbViewer() {
                   ? "border-primary/50 text-primary hover:bg-primary/10"
                   : "text-muted-foreground"
               }
-              title={
-                pinnedCameraView
-                  ? "Preview camera saved — click to update"
-                  : "Save current view as preview camera"
-              }
+              title={pinnedCameraView ? "Update saved preview camera" : "Save current view as preview camera"}
               onClick={() => {
                 const controls = orbitControlsRef.current;
                 const camera = cameraRef.current;
@@ -3726,7 +3736,18 @@ export function GlbViewer() {
               }}
             >
               <Camera className="mr-1.5 h-3.5 w-3.5" />
-              {pinnedCameraView ? "Preview Camera ✓" : "Set Preview Camera"}
+              Set Preview Camera
+            </Button>
+          ) : null}
+          {viewMode === "animate" && pinnedCameraView ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0 text-primary hover:bg-primary/10"
+              title="Return to saved preview angle"
+              onClick={() => applyCameraView(pinnedCameraView)}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
             </Button>
           ) : null}
           {viewMode === "animate" ? (
