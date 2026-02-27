@@ -2052,15 +2052,19 @@ export function GlbViewer() {
   };
 
   const loadFile = async (file: File) => {
-    if (!file.name.toLowerCase().endsWith(".glb")) {
-      setErrorMessage("Please choose a valid .glb file.");
+    const ext = file.name.toLowerCase().split(".").pop() ?? "";
+    const supported = ["glb", "gltf", "fbx", "obj", "stl"];
+
+    if (!supported.includes(ext)) {
+      setErrorMessage(
+        `Unsupported format. Please use: ${supported.map((e) => "." + e).join(", ")}`
+      );
       return;
     }
 
     setIsLoading(true);
     setErrorMessage(null);
     const loadId = ++loadIdRef.current;
-
     const previousScene = modelScene;
     setFileName(file.name);
 
@@ -2070,89 +2074,107 @@ export function GlbViewer() {
         lastModified: file.lastModified,
       });
       const buffer = await readFileBuffer(stableFile);
-      const loader = new GLTFLoader();
 
-      loader.parse(
-        buffer,
-        "",
-        (gltf) => {
-          if (loadId !== loadIdRef.current) return;
-          setModelScene(gltf.scene);
-          rotationPivotRef.current.clear();
-          const { items, objectMap } = getLayerItems(gltf.scene);
-          setLayerItems(items);
-          layerObjectMapRef.current = objectMap;
-          setSelectedLayerId(null);
-          setIsolationStack([]);
-          setRenamingLayerId(null);
-          setRenameValue("");
-          setLayerDetailsOpen({});
-          setLayerSectionOpen({});
-          setCollapsedGroupIds(new Set());
-          setTimelineExpandedLayerIds(new Set());
-          setAnimationTracks([]);
-          setPinnedCameraView(null);
-          setViewMode("animate");
-          const emptyDeleted = new Set<string>();
-          setDeletedLayerIds(emptyDeleted);
-          deletedLayerIdsRef.current = emptyDeleted;
-          setHasUnsavedChanges(false);
-          const initialSnapshot: LayerSnapshot = {};
-          objectMap.forEach((object, id) => {
-            initialSnapshot[id] = {
-              name: object.name,
-              visible: object.visible,
-              deleted: false,
-              opacity: getObjectOpacity(object),
-              position: {
-                x: object.position.x,
-                y: object.position.y,
-                z: object.position.z,
-              },
-              rotation: {
-                x: object.rotation.x,
-                y: object.rotation.y,
-                z: object.rotation.z,
-              },
-              scale: {
-                x: object.scale.x,
-                y: object.scale.y,
-                z: object.scale.z,
-              },
-            };
-          });
-          commitHistoryState(
-            [
-              {
-                id: `${Date.now()}-init`,
-                label: "Initial state",
-                snapshot: initialSnapshot,
-                tracks: [],
-              },
-            ],
-            0
-          );
-          pendingTransformLayerIdsRef.current.clear();
-          pendingScaleLayerIdsRef.current.clear();
-          pendingRotationLayerIdsRef.current.clear();
-          if (previousScene) disposeScene(previousScene);
-          setUploadModalOpen(false);
-          setIsLoading(false);
-        },
-        (error) => {
-          if (loadId !== loadIdRef.current) return;
-          setErrorMessage(error instanceof Error ? error.message : "Could not parse this .glb file.");
-          setIsLoading(false);
-        }
+      // ── Dispatch to the right loader ──────────────────────────────────────
+      let loadedScene: THREE.Object3D;
+
+      if (ext === "glb" || ext === "gltf") {
+        const loader = new GLTFLoader();
+        const gltf = await new Promise<{ scene: THREE.Object3D }>(
+          (resolve, reject) => loader.parse(buffer, "", resolve, reject)
+        );
+        loadedScene = gltf.scene;
+      } else if (ext === "fbx") {
+        const { FBXLoader } = await import("three/examples/jsm/loaders/FBXLoader.js");
+        loadedScene = new FBXLoader().parse(buffer, "");
+      } else if (ext === "obj") {
+        const { OBJLoader } = await import("three/examples/jsm/loaders/OBJLoader.js");
+        const text = new TextDecoder().decode(new Uint8Array(buffer));
+        loadedScene = new OBJLoader().parse(text);
+      } else {
+        // stl
+        const { STLLoader } = await import("three/examples/jsm/loaders/STLLoader.js");
+        const geometry = new STLLoader().parse(buffer);
+        const baseName = file.name.replace(/\.[^.]+$/, "");
+        const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0xaaaaaa }));
+        mesh.name = baseName;
+        const group = new THREE.Group();
+        group.name = baseName;
+        group.add(mesh);
+        loadedScene = group;
+      }
+
+      // ── Apply scene (same logic for all formats) ──────────────────────────
+      if (loadId !== loadIdRef.current) return;
+      setModelScene(loadedScene);
+      rotationPivotRef.current.clear();
+      const { items, objectMap } = getLayerItems(loadedScene);
+      setLayerItems(items);
+      layerObjectMapRef.current = objectMap;
+      setSelectedLayerId(null);
+      setIsolationStack([]);
+      setRenamingLayerId(null);
+      setRenameValue("");
+      setLayerDetailsOpen({});
+      setLayerSectionOpen({});
+      setCollapsedGroupIds(new Set());
+      setTimelineExpandedLayerIds(new Set());
+      setAnimationTracks([]);
+      setPinnedCameraView(null);
+      setViewMode("animate");
+      const emptyDeleted = new Set<string>();
+      setDeletedLayerIds(emptyDeleted);
+      deletedLayerIdsRef.current = emptyDeleted;
+      setHasUnsavedChanges(false);
+      const initialSnapshot: LayerSnapshot = {};
+      objectMap.forEach((object, id) => {
+        initialSnapshot[id] = {
+          name: object.name,
+          visible: object.visible,
+          deleted: false,
+          opacity: getObjectOpacity(object),
+          position: {
+            x: object.position.x,
+            y: object.position.y,
+            z: object.position.z,
+          },
+          rotation: {
+            x: object.rotation.x,
+            y: object.rotation.y,
+            z: object.rotation.z,
+          },
+          scale: {
+            x: object.scale.x,
+            y: object.scale.y,
+            z: object.scale.z,
+          },
+        };
+      });
+      commitHistoryState(
+        [
+          {
+            id: `${Date.now()}-init`,
+            label: "Initial state",
+            snapshot: initialSnapshot,
+            tracks: [],
+          },
+        ],
+        0
       );
+      pendingTransformLayerIdsRef.current.clear();
+      pendingScaleLayerIdsRef.current.clear();
+      pendingRotationLayerIdsRef.current.clear();
+      if (previousScene) disposeScene(previousScene);
+      setUploadModalOpen(false);
+      setIsLoading(false);
     } catch (error) {
       if (loadId !== loadIdRef.current) return;
-      const reason = error instanceof Error ? error.message : "Unknown read error";
+      const reason = error instanceof Error ? error.message : "Unknown error";
       const notFound = error instanceof DOMException && error.name === "NotFoundError";
       setErrorMessage(
         notFound
           ? "Failed to read file: File became unavailable during drop. Try the Select button or download locally first."
-          : `Failed to read file: ${reason}`
+          : `Could not parse this .${ext} file: ${reason}`
       );
       setIsLoading(false);
     }
@@ -3059,11 +3081,11 @@ export function GlbViewer() {
         isDragging ? "border-primary" : "border-border"
       )}
     >
-      <p className="text-xs text-muted-foreground">Drag/drop a file or pick one from disk.</p>
+      <p className="text-xs text-muted-foreground">Drag/drop a 3D file or pick one from disk. (.glb .gltf .fbx .obj .stl)</p>
       <Button size="sm" variant="secondary" onClick={() => inputRef.current?.click()}>
-        Select .glb file
+        Select 3D file
       </Button>
-      <input ref={inputRef} type="file" accept=".glb" onChange={onFilePick} className="hidden" />
+      <input ref={inputRef} type="file" accept=".glb,.gltf,.fbx,.obj,.stl" onChange={onFilePick} className="hidden" />
       {fileName ? (
         <p className="text-xs text-muted-foreground">
           {isLoading ? "Loading" : "Loaded"}: {fileName}
