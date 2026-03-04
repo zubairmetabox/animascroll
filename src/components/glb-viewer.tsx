@@ -43,6 +43,8 @@ import type {
   OrbitControls as OrbitControlsImpl,
 } from "three-stdlib";
 
+import { UserButton } from "@clerk/nextjs";
+import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -1147,6 +1149,9 @@ export function GlbViewer() {
     deletedLayerIdsRef.current = deletedLayerIds;
   }, [deletedLayerIds]);
 
+  // ── PostHog: editor opened ─────────────────────────────────────────────
+  useEffect(() => { posthog.capture("editor_opened"); }, []);
+
 
   useEffect(() => {
     const container = viewerRef.current;
@@ -2143,6 +2148,7 @@ export function GlbViewer() {
       // ── Apply scene (same logic for all formats) ──────────────────────────
       if (loadId !== loadIdRef.current) return;
       setModelScene(loadedScene);
+      posthog.capture("model_uploaded");
       rotationPivotRef.current.clear();
       const { items, objectMap } = getLayerItems(loadedScene);
       setLayerItems(items);
@@ -2361,6 +2367,7 @@ export function GlbViewer() {
 
   const exportHtmlAnimation = () => {
     if (!modelScene) return;
+    posthog.capture("animation_exported");
     const exporter = new GLTFExporter();
     const clone = modelScene.clone(true);
     exporter.parse(
@@ -2611,6 +2618,7 @@ export function GlbViewer() {
 
   const enterPreviewMode = () => {
     if (!hasModel) return;
+    posthog.capture("preview_entered");
     setIsPlaying(false);
     setMoveToolActive(false);
     setIsolationStack([]);
@@ -3672,12 +3680,28 @@ export function GlbViewer() {
         )}
       </div>
 
+      {/* ── Wordmark + UserButton — always visible when no model / in preview ─── */}
+      {(!hasModel || viewMode === "preview") && (
+        <div
+          className="absolute left-4 top-3 z-[60] flex items-center gap-2"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <span className="text-sm font-semibold tracking-tight text-foreground/80">
+            Animascroll
+          </span>
+        </div>
+      )}
+
       {/* ── Floating menu buttons — only after a model is loaded, not in preview ─── */}
       {hasModel && viewMode !== "preview" ? (
         <div
           className="absolute left-4 top-3 z-[60] flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
+          <span className="px-2 text-xs font-semibold tracking-tight text-foreground/60 select-none">
+            Animascroll
+          </span>
+          <div className="mx-0.5 h-4 w-px bg-border/60" />
           {/* File menu */}
           <div className="relative">
             <button
@@ -3874,6 +3898,16 @@ export function GlbViewer() {
         </aside>
       ) : null}
 
+      {/* ── UserButton — always visible when mode switcher is hidden ──────── */}
+      {(!hasModel || viewMode === "preview") && (
+        <div
+          className="absolute right-4 top-3 z-[60]"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <UserButton />
+        </div>
+      )}
+
       {/* ── Navigate / Animate / Preview mode toggle — top-right ─────────── */}
       {hasModel && viewMode !== "preview" ? (
         <div
@@ -3936,6 +3970,10 @@ export function GlbViewer() {
           >
             Preview
           </Button>
+          <div className="mx-0.5 h-4 w-px bg-border/60" />
+          <div className="flex items-center px-0.5">
+            <UserButton />
+          </div>
         </div>
       ) : null}
 

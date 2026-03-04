@@ -1,4 +1,7 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
+import { ClerkProvider } from "@clerk/nextjs";
+import { PostHogProvider, PostHogPageview } from "@/components/posthog-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -8,8 +11,17 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
+    <ClerkProvider>
+      <html lang="en">
+        <body>
+          <PostHogProvider>
+            <Suspense>
+              <PostHogPageview />
+            </Suspense>
+            {children}
+          </PostHogProvider>
+        </body>
+      </html>
+    </ClerkProvider>
   );
 }
