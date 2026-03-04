@@ -1,6 +1,13 @@
 {
-  "name": "glb-tool",
+  "name": "animascroll",
   "version": "0.1.0",
+  "description": "Browser-based 3D model animation authoring and export tool",
+  "author": "Metabox",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zubairmetabox/animascroll.git"
+  },
   "private": true,
   "scripts": {
     "dev": "next dev",
