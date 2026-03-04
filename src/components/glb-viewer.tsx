@@ -43,8 +43,10 @@ import type {
   OrbitControls as OrbitControlsImpl,
 } from "three-stdlib";
 
-import { UserButton } from "@clerk/nextjs";
+import { useRouter } from "next/navigation";
+import { UserButton, useUser } from "@clerk/nextjs";
 import posthog from "posthog-js";
+import { AiChatPanel } from "@/components/ai-chat-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -982,7 +984,7 @@ function getLayerItems(scene: THREE.Object3D): {
   return { items, objectMap };
 }
 
-export function GlbViewer() {
+export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -990,6 +992,8 @@ export function GlbViewer() {
   const [layerMessage, setLayerMessage] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isProjectLoading, setIsProjectLoading] = useState(!!initialProjectId);
+  const [isModelUploading, setIsModelUploading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("animate");
   const [pinnedCameraView, setPinnedCameraView] = useState<CameraView | null>(null);
   const [timelineLengthVh, setTimelineLengthVh] = useState(200);
@@ -1007,7 +1011,10 @@ export function GlbViewer() {
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const { user } = useUser();
+  const router = useRouter();
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const [uploadWarningOpen, setUploadWarningOpen] = useState(false);
   const [pendingSaveAction, setPendingSaveAction] = useState<(() => void) | null>(null);
   const [settings, setSettings] = useState<ViewerSettings>(DEFAULT_SETTINGS);
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
@@ -1038,6 +1045,7 @@ export function GlbViewer() {
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(new Set());
   const [deletedLayerIds, setDeletedLayerIds] = useState<Set<string>>(new Set());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [configText, setConfigText] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
@@ -1082,6 +1090,8 @@ export function GlbViewer() {
   const upsertKeyframeAtCurrentTimeRef = useRef<
     (layer: LayerItem, propertyId: string, pushToHistory?: boolean) => void
   >(() => {});
+  const saveToDbRef = useRef<() => Promise<void>>(async () => {});
+  const isModelUploadingRef = useRef(false);
   const lastUpsertTracksRef = useRef<AnimationTrack[]>([]);
   const timelineModifierDragRef = useRef<{
     layerId: string;
@@ -1914,6 +1924,8 @@ export function GlbViewer() {
     applyTimelinePropertyValueRef.current = applyTimelinePropertyValue;
     commitTimelinePropertyEditRef.current = commitTimelinePropertyEdit;
     upsertKeyframeAtCurrentTimeRef.current = upsertKeyframeAtCurrentTime;
+    saveToDbRef.current = saveToDb;
+    isModelUploadingRef.current = isModelUploading;
   });
 
   useEffect(() => {
@@ -2092,7 +2104,7 @@ export function GlbViewer() {
     setSelectedLayerId(null);
   };
 
-  const loadFile = async (file: File) => {
+  const loadFile = async (file: File, projectOpenOptions?: { projectId: string; config: ConfigPayload }) => {
     const ext = file.name.toLowerCase().split(".").pop() ?? "";
     const supported = ["glb", "gltf", "fbx", "obj", "stl"];
 
@@ -2162,7 +2174,29 @@ export function GlbViewer() {
       setCollapsedGroupIds(new Set());
       setTimelineExpandedLayerIds(new Set());
       setAnimationTracks([]);
-      setPinnedCameraView(null);
+      if (projectOpenOptions) {
+        setCurrentProjectId(projectOpenOptions.projectId);
+        const cfg = projectOpenOptions.config;
+        if (cfg.timelineLengthVh) setTimelineLengthVh(cfg.timelineLengthVh);
+        if (cfg.settings) setSettings(clampSettings({ ...DEFAULT_SETTINGS, ...cfg.settings }));
+        if (cfg.pointLights?.length) setPointLights(cfg.pointLights);
+        if (Array.isArray(cfg.animationTracks)) {
+          const remapped = cfg.animationTracks.map((track) => {
+            if (items.some((l) => l.id === track.layerId)) return track;
+            if (track.layerName) {
+              const match = items.find((l) => l.name === track.layerName);
+              if (match) return { ...track, layerId: match.id };
+            }
+            return track;
+          });
+          setAnimationTracks(remapped);
+        }
+        if (cfg.pinnedCameraView && typeof cfg.pinnedCameraView === "object") {
+          setPinnedCameraView(cfg.pinnedCameraView);
+          applyCameraView(cfg.pinnedCameraView);
+        }
+      }
+      if (!projectOpenOptions) setPinnedCameraView(null);
       setViewMode("animate");
       const emptyDeleted = new Set<string>();
       setDeletedLayerIds(emptyDeleted);
@@ -2209,6 +2243,27 @@ export function GlbViewer() {
       if (previousScene) disposeScene(previousScene);
       setUploadModalOpen(false);
       setIsLoading(false);
+
+      // Upload to Vercel Blob + update existing project in DB (background, new uploads only)
+      if (!projectOpenOptions && currentProjectId) {
+        setIsModelUploading(true);
+        void (async () => {
+          try {
+            const fd = new FormData();
+            fd.append("file", file);
+            const uploadRes = await fetch("/api/upload", { method: "POST", body: fd });
+            if (!uploadRes.ok) return;
+            const { url } = await uploadRes.json() as { url: string };
+            await fetch(`/api/projects/${currentProjectId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ modelBlobUrl: url, modelFilename: file.name }),
+            });
+          } catch { /* non-critical */ } finally {
+            setIsModelUploading(false);
+          }
+        })();
+      }
     } catch (error) {
       if (loadId !== loadIdRef.current) return;
       const reason = error instanceof Error ? error.message : "Unknown error";
@@ -2317,7 +2372,43 @@ export function GlbViewer() {
     setConfigMessage(result.message);
   };
 
-  const saveToFile = () => {
+  const captureThumbnail = (): string | null => {
+    const source = document.querySelector("canvas");
+    if (!source) return null;
+    try {
+      const thumb = document.createElement("canvas");
+      thumb.width = 400;
+      thumb.height = 225;
+      thumb.getContext("2d")!.drawImage(source, 0, 0, 400, 225);
+      return thumb.toDataURL("image/jpeg", 0.7);
+    } catch {
+      return null;
+    }
+  };
+
+  const saveToDb = async () => {
+    if (!currentProjectId) return;
+    setLayerMessage("Saving…");
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) {
+      payload.animationTracks = animationTracks.map((track) => ({
+        ...track,
+        layerName: getLayerName(track.layerId),
+      }));
+    }
+    const thumbnailDataUrl = captureThumbnail();
+    await fetch(`/api/projects/${currentProjectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: payload, ...(thumbnailDataUrl ? { thumbnailDataUrl } : {}) }),
+    });
+    setHasUnsavedChanges(false);
+    setLayerMessage("Saved.");
+  };
+
+  const exportConfigToFile = () => {
     const payload: ConfigPayload = { settings, pointLights };
     if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
     if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
@@ -2337,8 +2428,6 @@ export function GlbViewer() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    setHasUnsavedChanges(false);
-    setLayerMessage("Saved.");
   };
 
   const downloadAnimationJson = () => {
@@ -2558,6 +2647,68 @@ export function GlbViewer() {
     setHasUnsavedChanges(true);
   };
 
+  const setTracksWithHistory = (tracks: AnimationTrack[]) => {
+    setAnimationTracks(tracks);
+    pushHistory("AI animation", tracks);
+  };
+
+  const openProject = async (project: { id: string; model_blob_url: string | null; model_filename: string | null }) => {
+    if (!project.model_blob_url) return;
+    try {
+      const [modelRes, projRes] = await Promise.all([
+        fetch(project.model_blob_url),
+        fetch(`/api/projects/${project.id}`),
+      ]);
+      const blob = await modelRes.blob();
+      const file = new File([blob], project.model_filename ?? "model.glb", { type: blob.type });
+      const { project: full } = await projRes.json() as { project: { config: ConfigPayload } };
+      await loadFile(file, { projectId: project.id, config: full.config ?? {} as ConfigPayload });
+    } catch { /* show nothing — loadFile already handles errors */ }
+  };
+
+  // Auto-save project config (debounced 2s) whenever tracks or timeline length change
+  useEffect(() => {
+    if (!currentProjectId) return;
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) {
+      payload.animationTracks = animationTracks.map((t) => ({ ...t, layerName: getLayerName(t.layerId) }));
+    }
+    const timer = setTimeout(() => {
+      void fetch(`/api/projects/${currentProjectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: payload }),
+      });
+    }, 2000);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animationTracks, timelineLengthVh, currentProjectId]);
+
+  // Auto-load project from URL param on mount
+  useEffect(() => {
+    if (!initialProjectId) return;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/projects/${initialProjectId}`);
+        if (!res.ok) return;
+        const { project } = await res.json() as { project: { id: string; model_blob_url: string | null; model_filename: string | null; config: ConfigPayload } };
+        if (!project) return;
+        if (!project.model_blob_url) {
+          setCurrentProjectId(initialProjectId);
+          setIsProjectLoading(false);
+          setUploadModalOpen(true);
+          return;
+        }
+        await openProject(project);
+      } finally {
+        setIsProjectLoading(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const applyLayerSnapshot = (snapshot: LayerSnapshot) => {
     const deleted = new Set<string>();
     Object.entries(snapshot).forEach(([id, value]) => {
@@ -2671,7 +2822,7 @@ export function GlbViewer() {
 
       if (mod && key === "s") {
         event.preventDefault();
-        saveToFile();
+        if (!isModelUploadingRef.current) void saveToDbRef.current();
         return;
       }
 
@@ -3544,7 +3695,7 @@ export function GlbViewer() {
       <div className="absolute inset-0">
         {hasModel ? (
           <>
-          <Canvas onPointerMissed={viewMode === "animate" ? handleCanvasPointerMissed : undefined}>
+          <Canvas gl={{ preserveDrawingBuffer: true }} onPointerMissed={viewMode === "animate" ? handleCanvasPointerMissed : undefined}>
             <PerspectiveCamera
               ref={cameraRef}
               makeDefault
@@ -3686,9 +3837,21 @@ export function GlbViewer() {
           className="absolute left-4 top-3 z-[60] flex items-center gap-2"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <span className="text-sm font-semibold tracking-tight text-foreground/80">
-            Animascroll
+          <span className="inline-flex h-8 items-center gap-2 rounded-lg border border-border/40 bg-card/90 px-3 select-none backdrop-blur-sm">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/logo-mark.svg" alt="" className="h-4 w-auto" />
+            <span className="text-xs font-semibold tracking-tight text-foreground/60">Animascroll</span>
           </span>
+          {!hasModel && !isProjectLoading && (
+            <button
+              type="button"
+              onClick={() => router.push("/app")}
+              className="flex items-center gap-1.5 rounded-md border border-border/40 bg-card/80 px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors backdrop-blur-sm"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              Projects
+            </button>
+          )}
         </div>
       )}
 
@@ -3698,9 +3861,20 @@ export function GlbViewer() {
           className="absolute left-4 top-3 z-[60] flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <span className="px-2 text-xs font-semibold tracking-tight text-foreground/60 select-none">
-            Animascroll
+          <span className="inline-flex items-center gap-2 px-2 select-none">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/logo-mark.svg" alt="" className="h-4 w-auto" />
+            <span className="text-xs font-semibold tracking-tight text-foreground/60">Animascroll</span>
           </span>
+          <div className="mx-0.5 h-4 w-px bg-border/60" />
+          <button
+            type="button"
+            onPointerDown={(e) => { e.stopPropagation(); router.push("/app"); }}
+            className="flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium text-muted-foreground hover:bg-muted/80 hover:text-foreground transition-colors"
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+            Projects
+          </button>
           <div className="mx-0.5 h-4 w-px bg-border/60" />
           {/* File menu */}
           <div className="relative">
@@ -3756,11 +3930,20 @@ export function GlbViewer() {
                 <button
                   type="button"
                   className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel}
-                  onClick={() => { setFileMenuOpen(false); saveToFile(); }}
+                  disabled={!currentProjectId || isModelUploading}
+                  onClick={() => { setFileMenuOpen(false); void saveToDb(); }}
                 >
                   <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save</span>
                   <kbd className="font-sans text-xs text-muted-foreground">Ctrl S</kbd>
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={!hasModel}
+                  onClick={() => { setFileMenuOpen(false); exportConfigToFile(); }}
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Export Config…
                 </button>
                 <button
                   type="button"
@@ -3768,7 +3951,20 @@ export function GlbViewer() {
                   onClick={() => { setFileMenuOpen(false); guardUnsaved(loadFromFile); }}
                 >
                   <FolderOpen className="mr-2 h-4 w-4" />
-                  Load…
+                  Load Config…
+                </button>
+                <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => {
+                    setFileMenuOpen(false);
+                    if (isModelUploading) { setUploadWarningOpen(true); return; }
+                    guardUnsaved(() => router.push("/app"));
+                  }}
+                >
+                  <X className="mr-2 h-4 w-4" />
+                  Close Project
                 </button>
               </div>
             )}
@@ -3839,9 +4035,19 @@ export function GlbViewer() {
             </>
           ) : null}
 
-          {layerMessage ? (
-            <span className="pl-1 text-xs text-muted-foreground">{layerMessage}</span>
-          ) : null}
+          {(isModelUploading || layerMessage) && (
+            <>
+              <div className="mx-1 h-4 w-px bg-border/60" />
+              {isModelUploading ? (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <div className="h-3 w-3 animate-spin rounded-full border border-border border-t-primary" />
+                  Uploading model…
+                </div>
+              ) : layerMessage ? (
+                <span className="text-xs text-muted-foreground">{layerMessage}</span>
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
 
@@ -3874,10 +4080,17 @@ export function GlbViewer() {
         <div className="pointer-events-none absolute inset-0 z-30 border-2 border-dashed border-primary/70 bg-primary/10" />
       ) : null}
 
-      {!hasModel ? <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div> : null}
+      {isProjectLoading ? (
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-zinc-950">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-primary" />
+          <p className="text-sm text-zinc-400">Loading project…</p>
+        </div>
+      ) : !hasModel ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div>
+      ) : null}
 
       {hasModel && viewMode === "animate" ? (
-        <aside className="absolute left-4 top-14 z-50 w-fit space-y-2">
+        <aside className="absolute left-4 top-16 z-50 w-fit space-y-2">
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
               <Button
@@ -3899,7 +4112,7 @@ export function GlbViewer() {
       ) : null}
 
       {/* ── UserButton — always visible when mode switcher is hidden ──────── */}
-      {(!hasModel || viewMode === "preview") && (
+      {(!hasModel || viewMode === "preview") && !isProjectLoading && (
         <div
           className="absolute right-4 top-3 z-[60]"
           onPointerDown={(e) => e.stopPropagation()}
@@ -3918,11 +4131,12 @@ export function GlbViewer() {
             <Button
               size="sm"
               variant={pinnedCameraView ? "outline" : "secondary"}
-              className={
+              className={cn(
+                "h-7",
                 pinnedCameraView
                   ? "border-primary/50 text-primary hover:bg-primary/10"
                   : "text-muted-foreground"
-              }
+              )}
               title={pinnedCameraView ? "Update saved preview camera" : "Save current view as preview camera"}
               onClick={() => {
                 const controls = orbitControlsRef.current;
@@ -3956,6 +4170,7 @@ export function GlbViewer() {
           ) : null}
           <Button
             size="sm"
+            className="h-7"
             variant={viewMode === "animate" ? "default" : "secondary"}
             onClick={enterAnimateMode}
           >
@@ -3964,7 +4179,7 @@ export function GlbViewer() {
           <Button
             size="sm"
             variant="secondary"
-            className="text-muted-foreground hover:text-foreground"
+            className="h-7 text-muted-foreground hover:text-foreground"
             disabled={!hasModel}
             onClick={enterPreviewMode}
           >
@@ -3978,7 +4193,7 @@ export function GlbViewer() {
       ) : null}
 
       {hasModel && viewMode !== "preview" ? (
-        <aside className="absolute right-4 top-14 z-50 w-fit space-y-2">
+        <aside className="absolute right-4 top-16 z-50 w-fit space-y-2">
 
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
@@ -4252,6 +4467,15 @@ export function GlbViewer() {
               </CardContent>
             ) : null}
           </Card>
+
+          <AiChatPanel
+            layerItems={layerItems}
+            animationTracks={animationTracks}
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            setAnimationTracks={setTracksWithHistory as unknown as (t: any[]) => void}
+            timelineLengthVh={timelineLengthVh}
+            projectId={currentProjectId}
+          />
         </aside>
       ) : null}
 
@@ -5088,7 +5312,7 @@ export function GlbViewer() {
               <Button
                 size="sm"
                 onClick={() => {
-                  saveToFile();
+                  void saveToDb();
                   setSaveConfirmOpen(false);
                   pendingSaveAction?.();
                   setPendingSaveAction(null);
@@ -5096,6 +5320,34 @@ export function GlbViewer() {
               >
                 <Save className="mr-2 h-4 w-4" />
                 Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Upload-in-progress warning ───────────────────────────── */}
+      {uploadWarningOpen ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60">
+          <div className="w-[380px] rounded-xl border border-border bg-card p-6 shadow-2xl">
+            <h2 className="mb-1 text-base font-semibold">Model still uploading</h2>
+            <p className="mb-5 text-sm text-muted-foreground">
+              Your model is still being uploaded. Closing now will lose all data for this project.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setUploadWarningOpen(false)}
+              >
+                Wait
+              </Button>
+              <Button
+                size="sm"
+                variant="default"
+                onClick={() => { setUploadWarningOpen(false); router.push("/app"); }}
+              >
+                Close anyway
               </Button>
             </div>
           </div>
@@ -5110,6 +5362,7 @@ export function GlbViewer() {
         className="hidden"
         onChange={onJsonFilePick}
       />
+
     </div>
   );
 }
