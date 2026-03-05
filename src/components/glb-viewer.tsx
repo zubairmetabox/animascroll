@@ -38,6 +38,7 @@ import {
   ZoomOut,
   Maximize2,
   Move,
+  Sparkles,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
@@ -58,6 +59,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import SkillsManager from "@/components/skills-manager";
 
 type ViewerSettings = {
   backgroundColor: string;
@@ -136,6 +138,7 @@ type HistoryEntry = {
   label: string;
   snapshot: LayerSnapshot;
   tracks: AnimationTrack[];
+  cameraView?: CameraView;
 };
 
 type EasingType = "linear" | "easeIn" | "easeOut" | "easeInOut" | "easeInOutCubic";
@@ -1024,6 +1027,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const [logEvents, setLogEvents] = useState<{ id: string; ts: Date; msg: string }[]>([]);
   const addLog = (msg: string) =>
     setLogEvents((prev) => [{ id: crypto.randomUUID(), ts: new Date(), msg }, ...prev]);
@@ -1063,6 +1067,10 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [deletedLayerIds, setDeletedLayerIds] = useState<Set<string>>(new Set());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [currentProjectName, setCurrentProjectName] = useState<string | null>(null);
+  const [editingProjectName, setEditingProjectName] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const projectNameInputRef = useRef<HTMLInputElement>(null);
   const [configText, setConfigText] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
@@ -1203,10 +1211,14 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       setTimelineProgress(progress);
     };
 
-    updateTimelineFromScroll();
+    // Defer the initial computation — calling setState synchronously inside
+    // useEffect's commit phase can trigger "Maximum update depth exceeded" when
+    // timelineLengthVh changes rapidly (e.g. from AI operations).
+    const tid = setTimeout(updateTimelineFromScroll, 0);
     container.addEventListener("scroll", updateTimelineFromScroll, { passive: true });
     window.addEventListener("resize", updateTimelineFromScroll);
     return () => {
+      clearTimeout(tid);
       container.removeEventListener("scroll", updateTimelineFromScroll);
       window.removeEventListener("resize", updateTimelineFromScroll);
     };
@@ -1230,11 +1242,13 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       setTimelineProgress(clamped / timelineLengthVh);
     };
 
-    window.scrollTo(0, 0);
     window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll);
+    // Defer scrollTo so it doesn't synchronously fire onScroll during React's commit phase
+    const raf = requestAnimationFrame(() => window.scrollTo(0, 0));
 
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       document.body.style.height = prevBodyHeight;
@@ -2787,6 +2801,15 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       ...t,
       keyframes: [...t.keyframes],
     }));
+    // Capture current camera so undo/redo restores the view
+    const cam = cameraRef.current;
+    const ctrl = orbitControlsRef.current;
+    const cameraView: CameraView | undefined = cam && ctrl ? {
+      position: [cam.position.x, cam.position.y, cam.position.z],
+      target: [ctrl.target.x, ctrl.target.y, ctrl.target.z],
+      fov: cam.fov,
+      zoom: cam.zoom,
+    } : undefined;
     const base = historyEntriesRef.current.slice(0, historyIndexRef.current + 1);
     let next = [
       ...base,
@@ -2795,6 +2818,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         label,
         snapshot,
         tracks,
+        cameraView,
       },
     ];
     const maxEntries = 40;
@@ -2844,6 +2868,13 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [animationTracks, timelineLengthVh, currentProjectId]);
 
+  // Focus project name input when editing starts
+  useEffect(() => {
+    if (editingProjectName) {
+      projectNameInputRef.current?.select();
+    }
+  }, [editingProjectName]);
+
   // Auto-load project from URL param on mount
   useEffect(() => {
     if (!initialProjectId) return;
@@ -2851,8 +2882,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       try {
         const res = await fetch(`/api/projects/${initialProjectId}`);
         if (!res.ok) return;
-        const { project } = await res.json() as { project: { id: string; model_blob_url: string | null; model_filename: string | null; config: ConfigPayload } };
+        const { project } = await res.json() as { project: { id: string; name: string; model_blob_url: string | null; model_filename: string | null; config: ConfigPayload } };
         if (!project) return;
+        setCurrentProjectName(project.name ?? null);
         if (!project.model_blob_url) {
           setCurrentProjectId(initialProjectId);
           setIsProjectLoading(false);
@@ -2905,6 +2937,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     applyLayerSnapshot(entry.snapshot);
     setAnimationTracks(entry.tracks ?? []);
     setIsolationStack([]);
+    if (entry.cameraView) {
+      applyCameraView(entry.cameraView);
+    }
   };
 
   const undoLayerChange = () => {
@@ -4018,6 +4053,50 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           >
             <Logo variant="light" markHeight="h-4" />
           </button>
+
+          {/* Editable project name */}
+          {currentProjectName !== null && (
+            <>
+              <div className="mx-1 h-4 w-px bg-border/60 shrink-0" />
+              {editingProjectName ? (
+                <input
+                  ref={projectNameInputRef}
+                  className="max-w-[160px] bg-transparent text-sm font-medium text-foreground outline-none border-b border-zinc-500 focus:border-white px-1 py-0.5"
+                  value={projectNameDraft}
+                  onChange={(e) => setProjectNameDraft(e.target.value)}
+                  onBlur={async () => {
+                    setEditingProjectName(false);
+                    const trimmed = projectNameDraft.trim();
+                    if (trimmed && trimmed !== currentProjectName && currentProjectId) {
+                      setCurrentProjectName(trimmed);
+                      await fetch(`/api/projects/${currentProjectId}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: trimmed }),
+                      });
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                    if (e.key === "Escape") { setEditingProjectName(false); }
+                    e.stopPropagation();
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="max-w-[160px] truncate px-1.5 py-0.5 text-sm font-medium text-zinc-300 hover:text-white rounded hover:bg-muted/60 transition-colors text-left"
+                  title="Click to rename"
+                  onClick={(e) => { e.stopPropagation(); setProjectNameDraft(currentProjectName ?? ""); setEditingProjectName(true); }}
+                >
+                  {currentProjectName}
+                </button>
+              )}
+            </>
+          )}
+
           <div className="mx-0.5 h-4 w-px bg-border/60" />
           {/* File menu */}
           <div className="relative">
@@ -4079,6 +4158,14 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                   Load Config…
                 </button>
                 <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => { setFileMenuOpen(false); setSkillsOpen(true); }}
+                >
+                  <Sparkles className="mr-2 h-4 w-4" />
+                  Animation Skills…
+                </button>
                 <button
                   type="button"
                   className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
@@ -4634,6 +4721,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             setPointLights={(lights) => { setPointLights(lights); setHasUnsavedChanges(true); scheduleAutosave(); }}
             projectId={currentProjectId}
             addLog={addLog}
+            onOperationsApplied={fitModelToCamera}
             onExplodedView={(centroid, maxOffset) => {
               const camera = cameraRef.current;
               const controls = orbitControlsRef.current;
@@ -5591,6 +5679,37 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           </div>
         </div>
       ) : null}
+
+      {/* ── Skills modal ───────────────────────────────────────────── */}
+      {skillsOpen && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
+          onPointerDown={() => setSkillsOpen(false)}
+        >
+          <div
+            className="flex flex-col rounded-xl border border-border bg-card shadow-2xl overflow-hidden"
+            style={{ width: 760, maxHeight: "80vh" }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-zinc-400" />
+                <h2 className="text-sm font-semibold">Animation Skills</h2>
+              </div>
+              <button
+                type="button"
+                className="rounded p-1 hover:bg-muted"
+                onClick={() => setSkillsOpen(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <SkillsManager mode="modal" />
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

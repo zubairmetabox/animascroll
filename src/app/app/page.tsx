@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
-import { Clock, FolderOpen, Plus, Trash2, X } from "lucide-react";
+import { Clock, FolderOpen, Pencil, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import SkillsManager from "@/components/skills-manager";
 
 type Project = {
   id: string;
@@ -28,8 +29,11 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+type Tab = "projects" | "skills";
+
 export default function ProjectsPage() {
   const router = useRouter();
+  const [tab, setTab] = useState<Tab>("projects");
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -37,6 +41,9 @@ export default function ProjectsPage() {
   const [creating, setCreating] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     fetch("/api/projects")
@@ -44,6 +51,10 @@ export default function ProjectsPage() {
       .then((d) => setProjects(d.projects ?? []))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (renamingId) renameInputRef.current?.select();
+  }, [renamingId]);
 
   const handleCreate = async () => {
     const name = projectName.trim() || "Untitled Project";
@@ -72,16 +83,72 @@ export default function ProjectsPage() {
     }
   };
 
+  const startRename = (p: Project, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenamingId(p.id);
+    setRenameValue(p.name);
+  };
+
+  const commitRename = async () => {
+    if (!renamingId) return;
+    const trimmed = renameValue.trim();
+    if (trimmed) {
+      setProjects((prev) => prev.map((p) => p.id === renamingId ? { ...p, name: trimmed } : p));
+      await fetch(`/api/projects/${renamingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+    }
+    setRenamingId(null);
+  };
+
   return (
-    <div className="min-h-screen bg-zinc-950 text-foreground">
+    <div className="min-h-screen bg-zinc-950 text-foreground flex flex-col">
       {/* Header */}
-      <header className="flex items-center justify-between border-b border-border/30 px-8 py-4">
+      <header className="flex items-center justify-between border-b border-border/30 px-8 py-4 shrink-0">
         <Logo variant="light" markHeight="h-6" href="/app" />
         <UserButton />
       </header>
 
-      {/* Main */}
-      <main className="mx-auto max-w-5xl px-8 py-10">
+      {/* Tab bar */}
+      <div className="flex items-center gap-1 border-b border-border/30 px-8 shrink-0">
+        <button
+          onClick={() => setTab("projects")}
+          className={cn(
+            "flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors",
+            tab === "projects"
+              ? "border-white text-white"
+              : "border-transparent text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <FolderOpen className="h-3.5 w-3.5" />
+          Projects
+        </button>
+        <button
+          onClick={() => setTab("skills")}
+          className={cn(
+            "flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors",
+            tab === "skills"
+              ? "border-white text-white"
+              : "border-transparent text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          Animation Skills
+        </button>
+      </div>
+
+      {/* Skills tab */}
+      {tab === "skills" && (
+        <div className="flex-1 overflow-hidden">
+          <SkillsManager mode="page" />
+        </div>
+      )}
+
+      {/* Projects tab */}
+      {tab === "projects" && (
+      <main className="mx-auto max-w-5xl px-8 py-10 w-full">
         <div className="mb-8 flex items-center justify-between">
           <h1 className="text-2xl font-semibold text-white">Your Projects</h1>
           <Button onClick={() => { setProjectName(""); setNewProjectOpen(true); }} className="gap-2">
@@ -135,7 +202,7 @@ export default function ProjectsPage() {
                   <div
                     role="button"
                     tabIndex={0}
-                    onClick={() => router.push(`/app/editor?id=${p.id}`)}
+                    onClick={() => { if (renamingId === p.id) return; router.push(`/app/editor?id=${p.id}`); }}
                     onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") router.push(`/app/editor?id=${p.id}`); }}
                     className={cn(
                       "group flex w-full cursor-pointer flex-col rounded-xl border border-border/40 bg-card/40 text-left transition-all overflow-hidden",
@@ -167,7 +234,34 @@ export default function ProjectsPage() {
                     </div>
                     {/* Info */}
                     <div className="min-w-0 p-3">
-                      <p className="truncate font-medium text-zinc-100">{p.name}</p>
+                      {renamingId === p.id ? (
+                        <input
+                          ref={renameInputRef}
+                          className="w-full bg-transparent font-medium text-zinc-100 outline-none border-b border-zinc-500 focus:border-white pb-0.5 text-sm"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onBlur={() => void commitRename()}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") { e.preventDefault(); void commitRename(); }
+                            if (e.key === "Escape") setRenamingId(null);
+                            e.stopPropagation();
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          autoFocus
+                        />
+                      ) : (
+                        <div className="flex items-center gap-1 min-w-0">
+                          <p className="truncate font-medium text-zinc-100 flex-1">{p.name}</p>
+                          <button
+                            type="button"
+                            onClick={(e) => startRename(p, e)}
+                            className="shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-all"
+                            title="Rename project"
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </button>
+                        </div>
+                      )}
                       <p className="truncate text-xs text-zinc-400 min-h-[1rem]">{p.model_filename ?? ""}</p>
                       <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-400">
                         <Clock className="h-3 w-3" />
@@ -181,6 +275,7 @@ export default function ProjectsPage() {
           </div>
         )}
       </main>
+      )}
 
       {/* New Project modal */}
       {newProjectOpen && (

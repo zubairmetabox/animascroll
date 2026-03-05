@@ -86,6 +86,8 @@ type Props = {
   projectId: string | null;
   addLog?: (msg: string) => void;
   onExplodedView?: (centroid: { x: number; y: number; z: number }, maxOffset: number) => void;
+  /** Called after AI operations are successfully applied — used to auto-fit camera */
+  onOperationsApplied?: () => void;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -322,6 +324,7 @@ export function AiChatPanel({
   projectId,
   addLog,
   onExplodedView,
+  onOperationsApplied,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -332,8 +335,8 @@ export function AiChatPanel({
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Always-fresh refs for callbacks used inside async sendMessage
-  const callbacksRef = useRef({ setTimelineLengthVh, patchSettings, setPointLights, pointLights, addLog, onExplodedView });
-  callbacksRef.current = { setTimelineLengthVh, patchSettings, setPointLights, pointLights, addLog, onExplodedView };
+  const callbacksRef = useRef({ setTimelineLengthVh, patchSettings, setPointLights, pointLights, addLog, onExplodedView, onOperationsApplied });
+  callbacksRef.current = { setTimelineLengthVh, patchSettings, setPointLights, pointLights, addLog, onExplodedView, onOperationsApplied };
 
   useEffect(() => {
     if (!projectId) {
@@ -451,6 +454,8 @@ export function AiChatPanel({
             onExplodedView: cb.onExplodedView,
           });
           setAnimationTracks(updated);
+          // Defer camera fit so it runs after React has committed the new tracks
+          setTimeout(() => callbacksRef.current.onOperationsApplied?.(), 50);
         }
 
         const assistantMsg: ChatMessage = {
