@@ -15,10 +15,32 @@
   --radius: 0.75rem;
 }
 
+.dark {
+  --background: 222 20% 7%;
+  --foreground: 210 20% 92%;
+  --card: 220 17% 12%;
+  --card-foreground: 210 20% 92%;
+  --border: 217 15% 22%;
+  --muted: 217 16% 18%;
+  --muted-foreground: 215 14% 58%;
+  --primary: 201 78% 42%;
+  --primary-foreground: 0 0% 98%;
+}
+
 * {
   @apply border-border;
 }
 
 body {
   @apply bg-background text-foreground antialiased;
+}
+
+/* Hide native number input spin buttons */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
 }

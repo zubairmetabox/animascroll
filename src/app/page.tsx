@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Logo } from "@/components/logo";
 
 const features = [
   {
@@ -29,11 +30,7 @@ export default function LandingPage() {
 
       {/* ── Navbar ─────────────────────────────────────────────────── */}
       <nav className="flex items-center justify-between px-6 py-4 md:px-12">
-        <div className="flex items-center gap-2">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo-mark.svg" alt="" className="h-7 w-auto" />
-          <span className="text-lg font-semibold tracking-tight text-white">Animascroll</span>
-        </div>
+        <Logo variant="light" markHeight="h-6" />
         <div className="flex items-center gap-3">
           <Link
             href="/sign-in"

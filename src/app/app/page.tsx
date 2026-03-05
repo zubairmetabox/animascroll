@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
 import { Clock, FolderOpen, Plus, Trash2, X } from "lucide-react";
+import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -75,11 +76,7 @@ export default function ProjectsPage() {
     <div className="min-h-screen bg-zinc-950 text-foreground">
       {/* Header */}
       <header className="flex items-center justify-between border-b border-border/30 px-8 py-4">
-        <div className="flex items-center gap-2">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo-mark.svg" alt="" className="h-7 w-auto" />
-          <span className="text-lg font-semibold tracking-tight text-white">Animascroll</span>
-        </div>
+        <Logo variant="light" markHeight="h-6" href="/app" />
         <UserButton />
       </header>
 
@@ -135,11 +132,13 @@ export default function ProjectsPage() {
                   </div>
                 ) : (
                   /* ── Normal card ── */
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => router.push(`/app/editor?id=${p.id}`)}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") router.push(`/app/editor?id=${p.id}`); }}
                     className={cn(
-                      "group flex w-full flex-col rounded-xl border border-border/40 bg-card/40 text-left transition-all overflow-hidden",
+                      "group flex w-full cursor-pointer flex-col rounded-xl border border-border/40 bg-card/40 text-left transition-all overflow-hidden",
                       "hover:border-primary/50 hover:bg-card/70"
                     )}
                   >
@@ -169,15 +168,13 @@ export default function ProjectsPage() {
                     {/* Info */}
                     <div className="min-w-0 p-3">
                       <p className="truncate font-medium text-zinc-100">{p.name}</p>
-                      {p.model_filename && (
-                        <p className="truncate text-xs text-zinc-400">{p.model_filename}</p>
-                      )}
-                      <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
+                      <p className="truncate text-xs text-zinc-400 min-h-[1rem]">{p.model_filename ?? ""}</p>
+                      <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-400">
                         <Clock className="h-3 w-3" />
                         {timeAgo(p.updated_at)}
                       </div>
                     </div>
-                  </button>
+                  </div>
                 )}
               </div>
             ))}
