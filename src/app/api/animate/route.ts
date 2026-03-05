@@ -1,5 +1,8 @@
+import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
+import { head } from "@vercel/blob";
+import type { SkillIndex } from "@/lib/skills";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -59,9 +62,51 @@ type SceneContext = {
 
 type Message = { role: "user" | "assistant"; content: string };
 
+// ── Skill fetching ─────────────────────────────────────────────────────────
+
+async function fetchMatchedSkills(userId: string, userPrompt: string): Promise<string[]> {
+  try {
+    const indexPath = `skills/${userId}/_index.json`;
+    const meta = await head(indexPath).catch(() => null);
+    if (!meta) return [];
+
+    const res = await fetch(meta.url, { cache: "no-store" });
+    if (!res.ok) return [];
+    const index = await res.json() as SkillIndex;
+
+    const promptLower = userPrompt.toLowerCase();
+    const matched = index.skills.filter(
+      (s) => s.enabled && s.keywords.some((kw) => promptLower.includes(kw.toLowerCase()))
+    );
+
+    if (matched.length === 0) return [];
+
+    // Fetch body content for matched skills (parallel)
+    const bodies = await Promise.all(
+      matched.map(async (entry) => {
+        try {
+          const r = await fetch(entry.blobUrl, { cache: "no-store" });
+          if (!r.ok) return null;
+          const raw = await r.text();
+          // Strip frontmatter, keep body
+          const m = raw.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/);
+          const body = m ? m[1].trim() : raw;
+          return `### Skill: ${entry.name}\n${body}`;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    return bodies.filter((b): b is string => b !== null);
+  } catch {
+    return [];
+  }
+}
+
 // ── System prompt ─────────────────────────────────────────────────────────
 
-function buildSystemPrompt(ctx: SceneContext): string {
+function buildSystemPrompt(ctx: SceneContext, skillBodies?: string[]): string {
   const layerList = ctx.layers.map((l) => {
     const indent = "  ".repeat(l.depth);
     const parent = l.parentName ? ` [child of "${l.parentName}"]` : "";
@@ -176,7 +221,11 @@ ONLY output valid JSON — no markdown, no explanation outside the JSON:
 Operation types: "set_track" | "delete_track" | "clear_all" | "set_timeline_length" | "set_scene" | "set_point_light" | "exploded_view"
 For "delete_track":  { "type": "delete_track", "layerName": "...", "propertyId": "..." }
 For "clear_all":     { "type": "clear_all" }
-For "exploded_view": { "type": "exploded_view", "vh": 400, "multiplier": 1.0 }`;
+For "exploded_view": { "type": "exploded_view", "vh": 400, "multiplier": 1.0 }${
+    skillBodies && skillBodies.length > 0
+      ? `\n\n## Animation Skills (apply these techniques when relevant)\n${skillBodies.join("\n\n---\n\n")}`
+      : ""
+  }`;
 }
 
 // ── JSON repair ───────────────────────────────────────────────────────────
@@ -238,6 +287,8 @@ function repairTruncatedJson(s: string): { message: string; operations: Operatio
 
 export async function POST(req: NextRequest) {
   try {
+    const { userId } = await auth();
+
     const body = await req.json() as {
       messages: Message[];
       sceneContext: SceneContext;
@@ -253,7 +304,11 @@ export async function POST(req: NextRequest) {
 
     const model = useVision ? "gpt-4o" : "llama-3.3-70b-versatile";
 
-    const systemPrompt = buildSystemPrompt(sceneContext);
+    // Fetch matched skills (non-blocking — if it fails, proceed without)
+    const userPrompt = messages.findLast((m) => m.role === "user")?.content ?? "";
+    const skillBodies = userId ? await fetchMatchedSkills(userId, userPrompt).catch(() => []) : [];
+
+    const systemPrompt = buildSystemPrompt(sceneContext, skillBodies);
 
     const apiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
       { role: "system", content: systemPrompt },
