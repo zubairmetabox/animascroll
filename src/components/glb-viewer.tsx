@@ -36,6 +36,7 @@ import {
   X,
   ZoomIn,
   ZoomOut,
+  Maximize2,
   Move,
 } from "lucide-react";
 import * as THREE from "three";
@@ -795,8 +796,17 @@ function sanitizePointLight(input: PointLightConfig, i: number): PointLightConfi
 }
 
 function getObjectPositionInfo(object: THREE.Object3D) {
-  const world = new THREE.Vector3();
-  object.getWorldPosition(world);
+  // For meshes, use the bounding box center as worldPosition — mesh origins are
+  // often all at the parent group's pivot (CAD/Maya exports), making getWorldPosition
+  // return the same value for every part. BBox center reflects actual geometry location.
+  let world: THREE.Vector3;
+  if ((object as THREE.Mesh).isMesh) {
+    const box = new THREE.Box3().setFromObject(object);
+    world = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
+  } else {
+    world = new THREE.Vector3();
+    object.getWorldPosition(world);
+  }
   return {
     position: {
       x: Number(object.position.x.toFixed(3)),
@@ -1013,6 +1023,10 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logEvents, setLogEvents] = useState<{ id: string; ts: Date; msg: string }[]>([]);
+  const addLog = (msg: string) =>
+    setLogEvents((prev) => [{ id: crypto.randomUUID(), ts: new Date(), msg }, ...prev]);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const { user } = useUser();
   const router = useRouter();
@@ -2061,6 +2075,40 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     camera.position.copy(center).addScaledVector(direction, distance);
     controls.target.copy(center);
     controls.update();
+  };
+
+  const fitModelToCamera = () => {
+    const camera = cameraRef.current;
+    const controls = orbitControlsRef.current;
+    if (!modelScene || !camera || !controls) return;
+
+    const box = new THREE.Box3().setFromObject(modelScene);
+    if (box.isEmpty()) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+
+    const fovRad = THREE.MathUtils.degToRad(camera.fov);
+    const distance = (maxDim / 2 / Math.tan(fovRad / 2)) * 1.5;
+
+    const direction = new THREE.Vector3()
+      .subVectors(camera.position, controls.target)
+      .normalize();
+
+    camera.position.copy(center).addScaledVector(direction, distance);
+    controls.target.copy(center);
+    controls.update();
+
+    // Immediately save as the pinned preview camera
+    setPinnedCameraView({
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      target: [controls.target.x, controls.target.y, controls.target.z],
+      fov: camera.fov,
+      zoom: camera.zoom,
+    });
+    setHasUnsavedChanges(true);
+    scheduleAutosave();
   };
 
   const selectLayer = (layerId: string) => {
@@ -4034,6 +4082,15 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                 <button
                   type="button"
                   className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => { setFileMenuOpen(false); setLogsOpen(true); }}
+                >
+                  <Clock3 className="mr-2 h-4 w-4" />
+                  Logs
+                </button>
+                <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
                   onClick={() => {
                     setFileMenuOpen(false);
                     if (isModelUploading) { setUploadWarningOpen(true); return; }
@@ -4211,6 +4268,17 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           className="absolute right-4 top-3 z-50 flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
+          {viewMode === "animate" && modelScene ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+              title="Fit camera to model and save as preview camera"
+              onClick={fitModelToCamera}
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </Button>
+          ) : null}
           {viewMode === "animate" ? (
             <Button
               size="sm"
@@ -4559,7 +4627,34 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             setAnimationTracks={setTracksWithHistory as unknown as (t: any[]) => void}
             timelineLengthVh={timelineLengthVh}
+            setTimelineLengthVh={(vh) => { setTimelineLengthVh(vh); setHasUnsavedChanges(true); scheduleAutosave(); }}
+            settings={settings}
+            patchSettings={patchSettings}
+            pointLights={pointLights}
+            setPointLights={(lights) => { setPointLights(lights); setHasUnsavedChanges(true); scheduleAutosave(); }}
             projectId={currentProjectId}
+            addLog={addLog}
+            onExplodedView={(centroid, maxOffset) => {
+              const camera = cameraRef.current;
+              const controls = orbitControlsRef.current;
+              if (!camera || !controls) return;
+              // Fit camera to the expected exploded radius (centroid + maxOffset in all directions)
+              const fovRad = THREE.MathUtils.degToRad(camera.fov);
+              const distance = (maxOffset / Math.tan(fovRad / 2)) * 2.0;
+              const direction = new THREE.Vector3()
+                .subVectors(camera.position, controls.target)
+                .normalize();
+              camera.position.set(centroid.x, centroid.y, centroid.z).addScaledVector(direction, distance);
+              controls.target.set(centroid.x, centroid.y, centroid.z);
+              controls.update();
+              setPinnedCameraView({
+                position: [camera.position.x, camera.position.y, camera.position.z],
+                target: [controls.target.x, controls.target.y, controls.target.z],
+                fov: camera.fov,
+                zoom: camera.zoom,
+              });
+              setHasUnsavedChanges(true); scheduleAutosave();
+            }}
           />
         </aside>
       ) : null}
@@ -5447,6 +5542,55 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         className="hidden"
         onChange={onJsonFilePick}
       />
+
+      {/* ── Logs modal ───────────────────────────────────────────── */}
+      {logsOpen ? (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
+          onPointerDown={() => setLogsOpen(false)}
+        >
+          <div
+            className="flex h-[70vh] w-[640px] flex-col rounded-xl border border-border bg-card shadow-2xl"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h2 className="text-sm font-semibold">Activity Log</h2>
+              <div className="flex items-center gap-2">
+                {logEvents.length > 0 && (
+                  <button
+                    type="button"
+                    className="rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                    onClick={() => setLogEvents([])}
+                  >
+                    Clear
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="rounded p-1 hover:bg-muted"
+                  onClick={() => setLogsOpen(false)}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 font-mono text-xs">
+              {logEvents.length === 0 ? (
+                <p className="p-4 text-center text-muted-foreground">No activity yet.</p>
+              ) : (
+                logEvents.map((e) => (
+                  <div key={e.id} className="flex gap-3 border-b border-border/40 px-2 py-1.5 last:border-0">
+                    <span className="shrink-0 tabular-nums text-muted-foreground">
+                      {e.ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                    </span>
+                    <span className="whitespace-pre-wrap break-all">{e.msg}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
     </div>
   );
