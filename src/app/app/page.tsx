@@ -17,6 +17,7 @@ type Project = {
   model_blob_url: string | null;
   thumbnail_url: string | null;
   updated_at: string;
+  is_sample?: boolean;
 };
 
 function timeAgo(dateStr: string): string {
@@ -222,6 +223,12 @@ export default function ProjectsPage() {
                           <FolderOpen className="h-8 w-8 text-muted-foreground/30 transition-colors group-hover:text-muted-foreground/60" />
                         </div>
                       )}
+                      {/* Sample badge */}
+                      {p.is_sample && (
+                        <div className="absolute left-2 top-2 rounded px-1.5 py-0.5 text-[10px] font-medium bg-black/50 text-zinc-400 border border-zinc-700/60 backdrop-blur-sm">
+                          Sample
+                        </div>
+                      )}
                       {/* Delete button */}
                       <button
                         type="button"
@@ -252,14 +259,16 @@ export default function ProjectsPage() {
                       ) : (
                         <div className="flex items-center gap-1 min-w-0">
                           <p className="truncate font-medium text-zinc-100 flex-1">{p.name}</p>
-                          <button
-                            type="button"
-                            onClick={(e) => startRename(p, e)}
-                            className="shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-all"
-                            title="Rename project"
-                          >
-                            <Pencil className="h-3 w-3" />
-                          </button>
+                          {!p.is_sample && (
+                            <button
+                              type="button"
+                              onClick={(e) => startRename(p, e)}
+                              className="shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-all"
+                              title="Rename project"
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                          )}
                         </div>
                       )}
                       <p className="truncate text-xs text-zinc-400 min-h-[1rem]">{p.model_filename ?? ""}</p>

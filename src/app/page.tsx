@@ -3,19 +3,29 @@ import { Logo } from "@/components/logo";
 
 const features = [
   {
+    title: "Just describe it",
+    description: "Tell the AI what you want — \"explode the parts apart as I scroll\" or \"spin it 360 with a cinematic reveal\" — and it builds the animation for you.",
+    icon: "✦",
+  },
+  {
     title: "Any 3D Format",
     description: "Upload GLB, GLTF, FBX, OBJ, or STL files. Works with models straight from Blender, Spline, or anywhere else.",
     icon: "⬡",
   },
   {
     title: "Visual Keyframe Timeline",
-    description: "Animate position, rotation, scale, and opacity per layer. Add easing, retime keyframes, and scrub in real time.",
+    description: "Every AI-generated animation lands on a real timeline. Tweak keyframes, adjust easing, and scrub in real time.",
     icon: "◆",
   },
   {
-    title: "Scroll-Driven Preview",
-    description: "Your animation plays as the user scrolls — perfect for landing pages, product showcases, and storytelling.",
+    title: "Scroll-Driven",
+    description: "Your animation plays as the user scrolls — built for landing pages, product showcases, and interactive storytelling.",
     icon: "↕",
+  },
+  {
+    title: "Custom Animation Skills",
+    description: "Teach the AI your own techniques. Define reusable skills with examples and the AI applies them whenever relevant.",
+    icon: "⚡",
   },
   {
     title: "Export to HTML",
@@ -51,14 +61,14 @@ export default function LandingPage() {
       <section className="mx-auto max-w-4xl px-6 pb-24 pt-24 text-center md:px-12 md:pt-32">
         <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-1 text-xs text-zinc-400">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-          Now in beta
+          AI-powered · Now in beta
         </div>
         <h1 className="mb-6 text-4xl font-bold tracking-tight text-white md:text-6xl">
-          Animate any 3D model.<br />
-          <span className="text-zinc-400">Export to the web.</span>
+          Animate 3D models<br />
+          <span className="text-zinc-400">by talking to AI.</span>
         </h1>
         <p className="mx-auto mb-10 max-w-xl text-base text-zinc-400 md:text-lg">
-          Upload a 3D model, animate it with a visual keyframe timeline, preview it with scroll-driven playback, and export a standalone HTML file — no code required.
+          Upload any 3D model, describe the animation you want, and let AI do the heavy lifting. Fine-tune on a visual timeline, preview with real scroll, and export to HTML — no code, no guesswork.
         </p>
         <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
           <Link
@@ -94,14 +104,39 @@ export default function LandingPage() {
         </div>
       </div>
 
+      {/* ── How it works ────────────────────────────────────────────── */}
+      <section className="mx-auto max-w-4xl px-6 pb-24 md:px-12">
+        <div className="mb-12 text-center">
+          <h2 className="text-2xl font-bold text-white md:text-3xl">
+            Your workflow, your pace
+          </h2>
+          <p className="mt-3 text-zinc-400">Let AI draft the animation, then fine-tune it — or build from scratch on the timeline. Either way.</p>
+        </div>
+        <div className="grid gap-6 sm:grid-cols-3">
+          {[
+            { step: "1", label: "Upload your model", detail: "Drop in a GLB, FBX, OBJ, or any common 3D format." },
+            { step: "2", label: "Animate — your way", detail: "Describe what you want and let AI generate a starting point, or place keyframes manually on the timeline." },
+            { step: "3", label: "Export & ship", detail: "Preview with real scroll, tweak if needed, export a standalone HTML file." },
+          ].map((s) => (
+            <div key={s.step} className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6">
+              <div className="mb-3 flex h-7 w-7 items-center justify-center rounded-full bg-zinc-800 text-xs font-bold text-zinc-300">
+                {s.step}
+              </div>
+              <h3 className="mb-1 font-semibold text-white">{s.label}</h3>
+              <p className="text-sm leading-relaxed text-zinc-400">{s.detail}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* ── Features ───────────────────────────────────────────────── */}
       <section className="mx-auto max-w-5xl px-6 pb-24 md:px-12">
         <div className="mb-12 text-center">
           <h2 className="text-2xl font-bold text-white md:text-3xl">
-            Everything you need to animate
+            Everything you need
           </h2>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {features.map((f) => (
             <div
               key={f.title}
@@ -118,9 +153,9 @@ export default function LandingPage() {
       {/* ── CTA ────────────────────────────────────────────────────── */}
       <section className="border-t border-zinc-800 py-24 text-center">
         <h2 className="mb-4 text-2xl font-bold text-white">
-          Start animating for free
+          Your 3D model deserves a great animation
         </h2>
-        <p className="mb-8 text-zinc-400">No credit card required.</p>
+        <p className="mb-8 text-zinc-400">Start for free. No credit card required.</p>
         <Link
           href="/sign-up"
           className="rounded-md bg-white px-6 py-2.5 text-sm font-semibold text-zinc-950 hover:bg-zinc-100 transition-colors"

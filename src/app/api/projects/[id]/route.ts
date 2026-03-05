@@ -65,18 +65,21 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
 
   // Fetch the project to get blob URLs (ownership check included)
   const rows = await sql`
-    SELECT model_blob_url, thumbnail_url FROM projects WHERE id = ${id} AND user_id = ${userId}
+    SELECT model_blob_url, thumbnail_url, is_sample FROM projects WHERE id = ${id} AND user_id = ${userId}
   `;
   if (!rows[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const blobUrl = rows[0].model_blob_url as string | null;
   const thumbUrl = rows[0].thumbnail_url as string | null;
+  const isSample = rows[0].is_sample as boolean;
 
-  // Delete blobs (non-fatal)
-  await Promise.all([
-    blobUrl ? del(blobUrl).catch(() => {}) : Promise.resolve(),
-    thumbUrl ? del(thumbUrl).catch(() => {}) : Promise.resolve(),
-  ]);
+  // Delete blobs (non-fatal) — skip for sample projects since the asset is shared
+  if (!isSample) {
+    await Promise.all([
+      blobUrl ? del(blobUrl).catch(() => {}) : Promise.resolve(),
+      thumbUrl ? del(thumbUrl).catch(() => {}) : Promise.resolve(),
+    ]);
+  }
 
   // Delete project (chat_messages cascade via FK)
   await sql`DELETE FROM projects WHERE id = ${id} AND user_id = ${userId}`;
