@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { Bounds, Center, OrbitControls, PerspectiveCamera, TransformControls } from "@react-three/drei";
+import { Bounds, Center, Environment, OrbitControls, PerspectiveCamera, TransformControls } from "@react-three/drei";
 import { EffectComposer, Outline } from "@react-three/postprocessing";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import {
   Box,
@@ -78,6 +80,10 @@ type ViewerSettings = {
   directionalZ: number;
   orbitEnableZoom: boolean;
   orbitAutoRotate: boolean;
+  useEnvironmentMap: boolean;
+  environmentPreset: string;
+  environmentIntensity: number;
+  toneMappingExposure: number;
 };
 
 type PointLightConfig = {
@@ -92,12 +98,21 @@ type PointLightConfig = {
   decay: number;
 };
 
+type LayerTransform = {
+  layerName: string;
+  position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number }; // degrees
+  scale: number;
+  opacity: number;
+};
+
 type ConfigPayload = {
   settings: ViewerSettings;
   pointLights: PointLightConfig[];
   pinnedCameraView?: CameraView;
   timelineLengthVh?: number;
   animationTracks?: AnimationTrack[];
+  layerTransforms?: LayerTransform[];
 };
 
 
@@ -192,6 +207,10 @@ const DEFAULT_SETTINGS: ViewerSettings = {
   directionalZ: 4,
   orbitEnableZoom: true,
   orbitAutoRotate: false,
+  useEnvironmentMap: true,
+  environmentPreset: "neutral",
+  environmentIntensity: 1,
+  toneMappingExposure: 1.5,
 };
 
 function createDefaultPointLight(index: number): PointLightConfig {
@@ -263,6 +282,45 @@ function disposeScene(scene: THREE.Object3D) {
     }
     mesh.material.dispose();
   });
+}
+
+function RendererConfig({ exposure }: { exposure: number }) {
+  useFrame(({ gl }) => {
+    if (gl.toneMappingExposure !== exposure) {
+      gl.toneMappingExposure = exposure;
+    }
+  });
+  return null;
+}
+
+// Self-contained studio lighting — no CDN, no external files.
+// Uses Three.js RoomEnvironment (soft-box studio) to provide correct PBR/IBL.
+function NeutralEnvironment({ intensity }: { intensity: number }) {
+  const get = useThree((state) => state.get);
+
+  useEffect(() => {
+    const { gl, scene } = get();
+    const generator = new THREE.PMREMGenerator(gl);
+    generator.compileEquirectangularShader();
+    const env = generator.fromScene(new RoomEnvironment() as Parameters<typeof generator.fromScene>[0], 0.04).texture;
+    const s = scene as THREE.Scene;
+    s.environment = env;
+    generator.dispose();
+    return () => {
+      env.dispose();
+      s.environment = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [get]);
+
+  useFrame(() => {
+    const s = get().scene as THREE.Scene;
+    if (s.environmentIntensity !== intensity) {
+      s.environmentIntensity = intensity;
+    }
+  });
+
+  return null;
 }
 
 function SceneGrid({
@@ -564,11 +622,18 @@ function ScrubbableNumberField({
   );
 }
 
+// "neutral" = local RoomEnvironment (no CDN); others fetch from Polyhaven CDN via drei
+const ENV_PRESETS = ["neutral", "studio", "city", "dawn", "forest", "lobby", "night", "park", "sunset", "warehouse"] as const;
+type EnvPreset = typeof ENV_PRESETS[number];
+
 function clampSettings(raw: ViewerSettings): ViewerSettings {
   return {
     ...raw,
     ambientIntensity: THREE.MathUtils.clamp(raw.ambientIntensity, 0, 3),
     directionalIntensity: THREE.MathUtils.clamp(raw.directionalIntensity, 0, 5),
+    environmentIntensity: THREE.MathUtils.clamp(raw.environmentIntensity ?? 1, 0, 3),
+    environmentPreset: ENV_PRESETS.includes(raw.environmentPreset as EnvPreset) ? raw.environmentPreset : "neutral",
+    toneMappingExposure: THREE.MathUtils.clamp(raw.toneMappingExposure ?? 1.5, 0.1, 5),
   };
 }
 
@@ -2063,9 +2128,13 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       if (ext === "glb" || ext === "gltf") {
         const loader = new GLTFLoader();
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath("/draco/gltf/");
+        loader.setDRACOLoader(dracoLoader);
         const gltf = await new Promise<{ scene: THREE.Object3D }>(
           (resolve, reject) => loader.parse(buffer, "", resolve, reject)
         );
+        dracoLoader.dispose();
         loadedScene = gltf.scene;
       } else if (ext === "fbx") {
         const { FBXLoader } = await import("three/examples/jsm/loaders/FBXLoader.js");
@@ -2124,6 +2193,33 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         if (cfg.pinnedCameraView && typeof cfg.pinnedCameraView === "object") {
           setPinnedCameraView(cfg.pinnedCameraView);
           applyCameraView(cfg.pinnedCameraView);
+        }
+        // Restore base layer transforms (position/rotation/scale/opacity) that were
+        // set without keyframes — these aren't covered by animationTracks.
+        if (Array.isArray(cfg.layerTransforms)) {
+          let transformsApplied = false;
+          for (const lt of cfg.layerTransforms) {
+            const match = items.find((l) => l.name === lt.layerName);
+            const obj = match ? objectMap.get(match.id) : undefined;
+            if (!obj) continue;
+            obj.position.set(lt.position.x, lt.position.y, lt.position.z);
+            obj.rotation.set(
+              THREE.MathUtils.degToRad(lt.rotation.x),
+              THREE.MathUtils.degToRad(lt.rotation.y),
+              THREE.MathUtils.degToRad(lt.rotation.z),
+              obj.rotation.order
+            );
+            obj.scale.set(lt.scale, lt.scale, lt.scale);
+            setObjectOpacity(obj, lt.opacity);
+            obj.updateMatrixWorld(true);
+            transformsApplied = true;
+          }
+          if (transformsApplied) {
+            // Rebuild layerItems so modifier labels reflect the restored state
+            const { items: updatedItems } = getLayerItems(loadedScene);
+            setLayerItems(updatedItems);
+            layerItemsRef.current = updatedItems;
+          }
         }
       }
       if (!projectOpenOptions) setPinnedCameraView(null);
@@ -2309,6 +2405,26 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         setAnimationTracks(remapped);
       }
 
+      // Restore base layer transforms (position/rotation/scale/opacity without keyframes)
+      if (Array.isArray(parsed.layerTransforms)) {
+        const currentLayers = layerItemsRef.current;
+        for (const lt of parsed.layerTransforms as LayerTransform[]) {
+          const match = currentLayers.find((l) => l.name === lt.layerName);
+          const obj = match ? layerObjectMapRef.current.get(match.id) : undefined;
+          if (!obj) continue;
+          obj.position.set(lt.position.x, lt.position.y, lt.position.z);
+          obj.rotation.set(
+            THREE.MathUtils.degToRad(lt.rotation.x),
+            THREE.MathUtils.degToRad(lt.rotation.y),
+            THREE.MathUtils.degToRad(lt.rotation.z),
+            obj.rotation.order
+          );
+          obj.scale.set(lt.scale, lt.scale, lt.scale);
+          setObjectOpacity(obj, lt.opacity);
+          obj.updateMatrixWorld(true);
+        }
+      }
+
       setHasUnsavedChanges(true); scheduleAutosave();
       return { ok: true, message: "Config applied." };
     } catch (error) {
@@ -2342,15 +2458,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     const thumbnailDataUrl = captureThumbnail();
     if (!thumbnailDataUrl) return;
     // Build config so pinnedCameraView (and any other unsaved changes) are persisted on close
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((track) => ({
-        ...track,
-        layerName: getLayerName(track.layerId),
-      }));
-    }
+    const payload = buildConfigPayload();
     try {
       await fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -2360,9 +2468,32 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     } catch { /* non-fatal */ }
   };
 
-  const saveToDb = async () => {
-    if (!currentProjectId) return;
-    setLayerMessage("Saving…");
+  // Collect current Three.js transforms for all layers so they survive reload.
+  const buildLayerTransforms = (): LayerTransform[] => {
+    const result: LayerTransform[] = [];
+    for (const layer of layerItemsRef.current) {
+      const obj = layerObjectMapRef.current.get(layer.id);
+      if (!obj) continue;
+      result.push({
+        layerName: layer.name,
+        position: {
+          x: Number(obj.position.x.toFixed(4)),
+          y: Number(obj.position.y.toFixed(4)),
+          z: Number(obj.position.z.toFixed(4)),
+        },
+        rotation: {
+          x: Number(THREE.MathUtils.radToDeg(obj.rotation.x).toFixed(2)),
+          y: Number(THREE.MathUtils.radToDeg(obj.rotation.y).toFixed(2)),
+          z: Number(THREE.MathUtils.radToDeg(obj.rotation.z).toFixed(2)),
+        },
+        scale: Number(obj.scale.x.toFixed(4)),
+        opacity: Number(getObjectOpacity(obj).toFixed(3)),
+      });
+    }
+    return result;
+  };
+
+  const buildConfigPayload = (): ConfigPayload => {
     const payload: ConfigPayload = { settings, pointLights };
     if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
     if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
@@ -2372,6 +2503,15 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         layerName: getLayerName(track.layerId),
       }));
     }
+    const transforms = buildLayerTransforms();
+    if (transforms.length > 0) payload.layerTransforms = transforms;
+    return payload;
+  };
+
+  const saveToDb = async () => {
+    if (!currentProjectId) return;
+    setLayerMessage("Saving…");
+    const payload = buildConfigPayload();
     const thumbnailDataUrl = captureThumbnail();
     await fetch(`/api/projects/${currentProjectId}`, {
       method: "PATCH",
@@ -2385,15 +2525,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   // Silent autosave — no thumbnail, no "Saving…" flash.
   const autoSaveConfigOnly = async () => {
     if (!currentProjectId || !hasUnsavedChangesRef.current || isModelUploadingRef.current) return;
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((track) => ({
-        ...track,
-        layerName: getLayerName(track.layerId),
-      }));
-    }
+    const payload = buildConfigPayload();
     try {
       await fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -2413,15 +2545,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const exportConfigToFile = () => {
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((track) => ({
-        ...track,
-        layerName: getLayerName(track.layerId),
-      }));
-    }
+    const payload = buildConfigPayload();
     const text = JSON.stringify(payload, null, 2);
     const blob = new Blob([text], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2692,12 +2816,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   // Auto-save project config (debounced 2s) whenever tracks or timeline length change
   useEffect(() => {
     if (!currentProjectId) return;
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((t) => ({ ...t, layerName: getLayerName(t.layerId) }));
-    }
+    const payload = buildConfigPayload();
     const timer = setTimeout(() => {
       void fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -3740,7 +3859,17 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               far={100000}
             />
             <color attach="background" args={[settings.backgroundColor]} />
+            <RendererConfig exposure={settings.toneMappingExposure} />
 
+            {settings.useEnvironmentMap && settings.environmentPreset === "neutral" ? (
+              <NeutralEnvironment intensity={settings.environmentIntensity} />
+            ) : settings.useEnvironmentMap ? (
+              <Environment
+                preset={settings.environmentPreset as Exclude<EnvPreset, "neutral">}
+                background={false}
+                environmentIntensity={settings.environmentIntensity}
+              />
+            ) : null}
             {settings.useAmbientLight ? <ambientLight intensity={settings.ambientIntensity} /> : null}
             {settings.useDirectionalLight ? (
               <directionalLight
@@ -4465,6 +4594,43 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                 </Button>
               </CardHeader>
               <CardContent className="space-y-3">
+                <ToggleField
+                  label="Environment map"
+                  checked={settings.useEnvironmentMap}
+                  onChange={(v) => patchSettings({ useEnvironmentMap: v })}
+                />
+                {settings.useEnvironmentMap && (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <Label>Preset</Label>
+                      <select
+                        value={settings.environmentPreset}
+                        onChange={(e) => patchSettings({ environmentPreset: e.target.value })}
+                        className="rounded border border-input bg-background px-2 py-1 text-xs"
+                      >
+                        {ENV_PRESETS.map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <SliderField
+                      label="Env intensity"
+                      value={settings.environmentIntensity}
+                      min={0}
+                      max={3}
+                      step={0.05}
+                      onChange={(v) => patchSettings({ environmentIntensity: v })}
+                    />
+                  </>
+                )}
+                <SliderField
+                  label="Exposure"
+                  value={settings.toneMappingExposure}
+                  min={0.1}
+                  max={5}
+                  step={0.05}
+                  onChange={(v) => patchSettings({ toneMappingExposure: v })}
+                />
                 <ToggleField
                   label="Ambient enabled"
                   checked={settings.useAmbientLight}
