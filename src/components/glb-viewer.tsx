@@ -36,15 +36,22 @@ import {
   X,
   ZoomIn,
   ZoomOut,
+  Maximize2,
   Move,
+  Sparkles,
+  Link2,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
   OrbitControls as OrbitControlsImpl,
 } from "three-stdlib";
 
-import { UserButton } from "@clerk/nextjs";
+import { upload } from "@vercel/blob/client";
+import { useRouter } from "next/navigation";
+import { UserButton, useUser } from "@clerk/nextjs";
 import posthog from "posthog-js";
+import { AiChatPanel } from "@/components/ai-chat-panel";
+import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -53,6 +60,8 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import SkillsManager from "@/components/skills-manager";
+import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animation-html";
 
 type ViewerSettings = {
   backgroundColor: string;
@@ -88,15 +97,6 @@ type ConfigPayload = {
   animationTracks?: AnimationTrack[];
 };
 
-type ExportConfig = {
-  backgroundColor: string;
-  useAmbientLight: boolean;
-  ambientIntensity: number;
-  pointLights: { color: string; intensity: number; x: number; y: number; z: number }[];
-  pinnedCamera: { position: [number, number, number]; target: [number, number, number]; fov: number; zoom: number } | null;
-  timelineLengthVh: number;
-  tracks: { layerName: string; propertyId: string; keyframes: { atVh: number; value: number; easing: string }[] }[];
-};
 
 type LayerItem = {
   id: string;
@@ -131,6 +131,7 @@ type HistoryEntry = {
   label: string;
   snapshot: LayerSnapshot;
   tracks: AnimationTrack[];
+  cameraView?: CameraView;
 };
 
 type EasingType = "linear" | "easeIn" | "easeOut" | "easeInOut" | "easeInOutCubic";
@@ -247,214 +248,6 @@ function applyEasing(t: number, easing: EasingType = "linear"): number {
   }
 }
 
-function generateAnimationHtml(glbDataUrl: string, cfg: ExportConfig): string {
-  const cfgJson = JSON.stringify(cfg);
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Animation</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-html { overflow-x: hidden; }
-body { background: ${cfg.backgroundColor}; }
-#canvas-wrap { position: fixed; inset: 0; }
-canvas { display: block; width: 100% !important; height: 100% !important; }
-</style>
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/"
-  }
-}
-</script>
-</head>
-<body>
-<div id="canvas-wrap"><canvas id="c"></canvas></div>
-<script type="module">
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-
-const CFG = ${cfgJson};
-const GLB_DATA_URL = '${glbDataUrl}';
-
-function applyEasing(t, easing) {
-  switch (easing) {
-    case 'easeIn':         return t * t;
-    case 'easeOut':        return t * (2 - t);
-    case 'easeInOut':      return t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
-    case 'easeInOutCubic': return t < 0.5 ? 4*t*t*t : (t-1)*(2*t-2)*(2*t-2)+1;
-    default:               return t;
-  }
-}
-
-function evaluateTrack(track, atVh) {
-  const kfs = track.keyframes;
-  if (!kfs.length) return 0;
-  if (kfs.length === 1 || atVh <= kfs[0].atVh) return kfs[0].value;
-  if (atVh >= kfs[kfs.length - 1].atVh) return kfs[kfs.length - 1].value;
-  for (let i = 0; i < kfs.length - 1; i++) {
-    if (kfs[i].atVh <= atVh && kfs[i + 1].atVh >= atVh) {
-      const raw = (atVh - kfs[i].atVh) / Math.max(1e-9, kfs[i + 1].atVh - kfs[i].atVh);
-      const t = applyEasing(raw, kfs[i].easing || 'linear');
-      return kfs[i].value + t * (kfs[i + 1].value - kfs[i].value);
-    }
-  }
-  return kfs[kfs.length - 1].value;
-}
-
-const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setClearColor(CFG.backgroundColor);
-renderer.shadowMap.enabled = true;
-
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(CFG.backgroundColor);
-
-const camera = new THREE.PerspectiveCamera(
-  CFG.pinnedCamera ? CFG.pinnedCamera.fov : 45,
-  window.innerWidth / window.innerHeight, 0.001, 100000
-);
-if (CFG.pinnedCamera) {
-  const p = CFG.pinnedCamera.position;
-  const t = CFG.pinnedCamera.target;
-  camera.position.set(p[0], p[1], p[2]);
-  camera.lookAt(new THREE.Vector3(t[0], t[1], t[2]));
-  camera.zoom = CFG.pinnedCamera.zoom != null ? CFG.pinnedCamera.zoom : 1;
-  camera.updateProjectionMatrix();
-}
-
-if (CFG.useAmbientLight) {
-  scene.add(new THREE.AmbientLight(0xffffff, CFG.ambientIntensity));
-}
-CFG.pointLights.forEach(function(l) {
-  const light = new THREE.PointLight(l.color, l.intensity, 100);
-  light.position.set(l.x, l.y, l.z);
-  scene.add(light);
-});
-
-function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
-}
-onResize();
-window.addEventListener('resize', onResize);
-
-document.body.style.height = (CFG.timelineLengthVh + 100) + 'vh';
-let currentVh = 0;
-function onScroll() {
-  const maxScroll = (CFG.timelineLengthVh / 100) * window.innerHeight;
-  currentVh = Math.min(Math.max(
-    (window.scrollY / Math.max(1, maxScroll)) * CFG.timelineLengthVh, 0
-  ), CFG.timelineLengthVh);
-}
-window.addEventListener('scroll', onScroll, { passive: true });
-window.addEventListener('resize', onScroll);
-
-const objMap = {};
-
-// Per-object rotation pivot: bounding-box centre + base state, captured once on
-// first rotation call so the object spins around its visual centre (not its
-// potentially offset local origin) without accumulating position drift.
-const pivotMap = {};
-function getOrCapturePivot(obj) {
-  if (pivotMap[obj.name]) return pivotMap[obj.name];
-  const bbox = new THREE.Box3().setFromObject(obj);
-  if (bbox.isEmpty()) return null;
-  const centerWorld = new THREE.Vector3();
-  bbox.getCenter(centerWorld);
-  const centerLocal = obj.parent
-    ? obj.parent.worldToLocal(centerWorld.clone())
-    : centerWorld.clone();
-  pivotMap[obj.name] = {
-    centerLocal,
-    basePos: obj.position.clone(),
-    baseQuat: obj.quaternion.clone(),
-  };
-  return pivotMap[obj.name];
-}
-
-function applyValue(obj, propertyId, value) {
-  switch (propertyId) {
-    case 'position.x': obj.position.x = value; break;
-    case 'position.y': obj.position.y = value; break;
-    case 'position.z': obj.position.z = value; break;
-    case 'rotation.x':
-    case 'rotation.y':
-    case 'rotation.z': {
-      const axis = propertyId.split('.')[1];
-      const rad = THREE.MathUtils.degToRad(value);
-      const newRotX = axis === 'x' ? rad : obj.rotation.x;
-      const newRotY = axis === 'y' ? rad : obj.rotation.y;
-      const newRotZ = axis === 'z' ? rad : obj.rotation.z;
-      const pivot = getOrCapturePivot(obj);
-      if (pivot) {
-        const newQuat = new THREE.Quaternion().setFromEuler(
-          new THREE.Euler(newRotX, newRotY, newRotZ, obj.rotation.order)
-        );
-        const deltaQuat = newQuat.clone().multiply(pivot.baseQuat.clone().invert());
-        const V = new THREE.Vector3().subVectors(pivot.centerLocal, pivot.basePos);
-        obj.position.subVectors(pivot.centerLocal, V.clone().applyQuaternion(deltaQuat));
-      }
-      obj.rotation.set(newRotX, newRotY, newRotZ, obj.rotation.order);
-      break;
-    }
-    case 'scale.uniform': obj.scale.setScalar(value); break;
-    case 'opacity':
-      obj.traverse(function(child) {
-        if (child.isMesh && child.material) {
-          child.material.transparent = true;
-          child.material.opacity = Math.min(Math.max(value, 0), 1);
-          child.material.needsUpdate = true;
-        }
-      });
-      break;
-  }
-}
-
-function applyTracks() {
-  CFG.tracks.forEach(function(track) {
-    const obj = objMap[track.layerName];
-    if (!obj) return;
-    applyValue(obj, track.propertyId, evaluateTrack(track, currentVh));
-  });
-}
-
-const loader = new GLTFLoader();
-loader.load(GLB_DATA_URL, function(gltf) {
-  scene.add(gltf.scene);
-
-  // Centre at world origin — matches Drei's <Center> in the editor so
-  // the saved camera target [0,0,0] points at the model correctly.
-  var box = new THREE.Box3().setFromObject(gltf.scene);
-  if (!box.isEmpty()) {
-    var center = box.getCenter(new THREE.Vector3());
-    gltf.scene.position.sub(center);
-    gltf.scene.updateMatrixWorld(true);
-  }
-
-  gltf.scene.traverse(function(obj) {
-    if (obj.name) objMap[obj.name] = obj;
-  });
-  applyTracks();
-  requestAnimationFrame(render);
-}, undefined, function(err) {
-  console.error('GLB load error', err);
-});
-
-function render() {
-  applyTracks();
-  renderer.render(scene, camera);
-  requestAnimationFrame(render);
-}
-</script>
-</body>
-</html>`;
-}
 
 function disposeScene(scene: THREE.Object3D) {
   scene.traverse((child) => {
@@ -791,8 +584,17 @@ function sanitizePointLight(input: PointLightConfig, i: number): PointLightConfi
 }
 
 function getObjectPositionInfo(object: THREE.Object3D) {
-  const world = new THREE.Vector3();
-  object.getWorldPosition(world);
+  // For meshes, use the bounding box center as worldPosition — mesh origins are
+  // often all at the parent group's pivot (CAD/Maya exports), making getWorldPosition
+  // return the same value for every part. BBox center reflects actual geometry location.
+  let world: THREE.Vector3;
+  if ((object as THREE.Mesh).isMesh) {
+    const box = new THREE.Box3().setFromObject(object);
+    world = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
+  } else {
+    world = new THREE.Vector3();
+    object.getWorldPosition(world);
+  }
   return {
     position: {
       x: Number(object.position.x.toFixed(3)),
@@ -982,7 +784,7 @@ function getLayerItems(scene: THREE.Object3D): {
   return { items, objectMap };
 }
 
-export function GlbViewer() {
+export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -990,6 +792,9 @@ export function GlbViewer() {
   const [layerMessage, setLayerMessage] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isProjectLoading, setIsProjectLoading] = useState(!!initialProjectId);
+  const [isModelUploading, setIsModelUploading] = useState(false);
+  const [isNavigating, setIsNavigating] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("animate");
   const [pinnedCameraView, setPinnedCameraView] = useState<CameraView | null>(null);
   const [timelineLengthVh, setTimelineLengthVh] = useState(200);
@@ -1006,8 +811,16 @@ export function GlbViewer() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [logEvents, setLogEvents] = useState<{ id: string; ts: Date; msg: string }[]>([]);
+  const addLog = (msg: string) =>
+    setLogEvents((prev) => [{ id: crypto.randomUUID(), ts: new Date(), msg }, ...prev]);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const { user } = useUser();
+  const router = useRouter();
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const [uploadWarningOpen, setUploadWarningOpen] = useState(false);
   const [pendingSaveAction, setPendingSaveAction] = useState<(() => void) | null>(null);
   const [settings, setSettings] = useState<ViewerSettings>(DEFAULT_SETTINGS);
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
@@ -1038,6 +851,15 @@ export function GlbViewer() {
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(new Set());
   const [deletedLayerIds, setDeletedLayerIds] = useState<Set<string>>(new Set());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [currentProjectName, setCurrentProjectName] = useState<string | null>(null);
+  const [editingProjectName, setEditingProjectName] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const projectNameInputRef = useRef<HTMLInputElement>(null);
+  const [isProjectPublic, setIsProjectPublic] = useState(false);
+  const [shareMenuOpen, setShareMenuOpen] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [shareLoading, setShareLoading] = useState(false);
   const [configText, setConfigText] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
@@ -1082,6 +904,12 @@ export function GlbViewer() {
   const upsertKeyframeAtCurrentTimeRef = useRef<
     (layer: LayerItem, propertyId: string, pushToHistory?: boolean) => void
   >(() => {});
+  const saveToDbRef = useRef<() => Promise<void>>(async () => {});
+  const autoSaveConfigOnlyRef = useRef<() => Promise<void>>(async () => {});
+  const hasUnsavedChangesRef = useRef(false);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isModelUploadingRef = useRef(false);
+  const modelUploadPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const lastUpsertTracksRef = useRef<AnimationTrack[]>([]);
   const timelineModifierDragRef = useRef<{
     layerId: string;
@@ -1172,10 +1000,14 @@ export function GlbViewer() {
       setTimelineProgress(progress);
     };
 
-    updateTimelineFromScroll();
+    // Defer the initial computation — calling setState synchronously inside
+    // useEffect's commit phase can trigger "Maximum update depth exceeded" when
+    // timelineLengthVh changes rapidly (e.g. from AI operations).
+    const tid = setTimeout(updateTimelineFromScroll, 0);
     container.addEventListener("scroll", updateTimelineFromScroll, { passive: true });
     window.addEventListener("resize", updateTimelineFromScroll);
     return () => {
+      clearTimeout(tid);
       container.removeEventListener("scroll", updateTimelineFromScroll);
       window.removeEventListener("resize", updateTimelineFromScroll);
     };
@@ -1199,11 +1031,13 @@ export function GlbViewer() {
       setTimelineProgress(clamped / timelineLengthVh);
     };
 
-    window.scrollTo(0, 0);
     window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll);
+    // Defer scrollTo so it doesn't synchronously fire onScroll during React's commit phase
+    const raf = requestAnimationFrame(() => window.scrollTo(0, 0));
 
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       document.body.style.height = prevBodyHeight;
@@ -1293,11 +1127,11 @@ export function GlbViewer() {
   }, [kfContextMenu]);
 
   useEffect(() => {
-    if (!fileMenuOpen && !editMenuOpen) return;
-    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); };
+    if (!fileMenuOpen && !editMenuOpen && !shareMenuOpen) return;
+    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); setShareMenuOpen(false); };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
-  }, [fileMenuOpen, editMenuOpen]);
+  }, [fileMenuOpen, editMenuOpen, shareMenuOpen]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -1547,7 +1381,7 @@ export function GlbViewer() {
 
   const patchSettings = (patch: Partial<ViewerSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
   };
 
   const updateTimelineLengthVh = (rawValue: string) => {
@@ -1555,7 +1389,7 @@ export function GlbViewer() {
     if (Number.isNaN(parsed)) return;
     const next = THREE.MathUtils.clamp(Math.round(parsed), 50, 5000);
     setTimelineLengthVh(next);
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
   };
 
   const adjustTimelineZoom = (direction: "in" | "out") => {
@@ -1780,7 +1614,7 @@ export function GlbViewer() {
     }
     lastUpsertTracksRef.current = next;
     setAnimationTracks(next);
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
     if (doHistory) {
       pushHistory("Set keyframe", next);
     }
@@ -1914,7 +1748,22 @@ export function GlbViewer() {
     applyTimelinePropertyValueRef.current = applyTimelinePropertyValue;
     commitTimelinePropertyEditRef.current = commitTimelinePropertyEdit;
     upsertKeyframeAtCurrentTimeRef.current = upsertKeyframeAtCurrentTime;
+    saveToDbRef.current = saveToDb;
+    autoSaveConfigOnlyRef.current = autoSaveConfigOnly;
+    hasUnsavedChangesRef.current = hasUnsavedChanges;
+    isModelUploadingRef.current = isModelUploading;
   });
+
+  // Autosave: 2-min fallback interval (retries if debounce save failed) + debounce cleanup on unmount.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (hasUnsavedChangesRef.current) void autoSaveConfigOnlyRef.current();
+    }, 2 * 60 * 1000);
+    return () => {
+      clearInterval(interval);
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (animationTracks.length === 0) return;
@@ -2031,6 +1880,40 @@ export function GlbViewer() {
     controls.update();
   };
 
+  const fitModelToCamera = () => {
+    const camera = cameraRef.current;
+    const controls = orbitControlsRef.current;
+    if (!modelScene || !camera || !controls) return;
+
+    const box = new THREE.Box3().setFromObject(modelScene);
+    if (box.isEmpty()) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+
+    const fovRad = THREE.MathUtils.degToRad(camera.fov);
+    const distance = (maxDim / 2 / Math.tan(fovRad / 2)) * 1.5;
+
+    const direction = new THREE.Vector3()
+      .subVectors(camera.position, controls.target)
+      .normalize();
+
+    camera.position.copy(center).addScaledVector(direction, distance);
+    controls.target.copy(center);
+    controls.update();
+
+    // Immediately save as the pinned preview camera
+    setPinnedCameraView({
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      target: [controls.target.x, controls.target.y, controls.target.z],
+      fov: camera.fov,
+      zoom: camera.zoom,
+    });
+    setHasUnsavedChanges(true);
+    scheduleAutosave();
+  };
+
   const selectLayer = (layerId: string) => {
     if (!layerObjectMapRef.current.get(layerId)) {
       setSelectedLayerId(null);
@@ -2092,7 +1975,7 @@ export function GlbViewer() {
     setSelectedLayerId(null);
   };
 
-  const loadFile = async (file: File) => {
+  const loadFile = async (file: File, projectOpenOptions?: { projectId: string; config: ConfigPayload }) => {
     const ext = file.name.toLowerCase().split(".").pop() ?? "";
     const supported = ["glb", "gltf", "fbx", "obj", "stl"];
 
@@ -2101,6 +1984,24 @@ export function GlbViewer() {
         `Unsupported format. Please use: ${supported.map((e) => "." + e).join(", ")}`
       );
       return;
+    }
+
+    // Quota check — only for new uploads, not when opening existing projects
+    if (!projectOpenOptions) {
+      try {
+        const quotaRes = await fetch("/api/upload");
+        if (quotaRes.ok) {
+          const { usedBytes, limitBytes } = await quotaRes.json() as { usedBytes: number; limitBytes: number };
+          if (usedBytes + file.size > limitBytes) {
+            const usedMb = (usedBytes / 1024 / 1024).toFixed(1);
+            const limitMb = (limitBytes / 1024 / 1024).toFixed(0);
+            setErrorMessage(
+              `Storage limit reached (${usedMb} MB of ${limitMb} MB used). Delete a project to free space.`
+            );
+            return;
+          }
+        }
+      } catch { /* non-fatal — let the upload attempt proceed */ }
     }
 
     setIsLoading(true);
@@ -2162,7 +2063,29 @@ export function GlbViewer() {
       setCollapsedGroupIds(new Set());
       setTimelineExpandedLayerIds(new Set());
       setAnimationTracks([]);
-      setPinnedCameraView(null);
+      if (projectOpenOptions) {
+        setCurrentProjectId(projectOpenOptions.projectId);
+        const cfg = projectOpenOptions.config;
+        if (cfg.timelineLengthVh) setTimelineLengthVh(cfg.timelineLengthVh);
+        if (cfg.settings) setSettings(clampSettings({ ...DEFAULT_SETTINGS, ...cfg.settings }));
+        if (cfg.pointLights?.length) setPointLights(cfg.pointLights);
+        if (Array.isArray(cfg.animationTracks)) {
+          const remapped = cfg.animationTracks.map((track) => {
+            if (items.some((l) => l.id === track.layerId)) return track;
+            if (track.layerName) {
+              const match = items.find((l) => l.name === track.layerName);
+              if (match) return { ...track, layerId: match.id };
+            }
+            return track;
+          });
+          setAnimationTracks(remapped);
+        }
+        if (cfg.pinnedCameraView && typeof cfg.pinnedCameraView === "object") {
+          setPinnedCameraView(cfg.pinnedCameraView);
+          applyCameraView(cfg.pinnedCameraView);
+        }
+      }
+      if (!projectOpenOptions) setPinnedCameraView(null);
       setViewMode("animate");
       const emptyDeleted = new Set<string>();
       setDeletedLayerIds(emptyDeleted);
@@ -2209,6 +2132,36 @@ export function GlbViewer() {
       if (previousScene) disposeScene(previousScene);
       setUploadModalOpen(false);
       setIsLoading(false);
+
+      // Upload to Vercel Blob + update existing project in DB (background, new uploads only)
+      if (!projectOpenOptions && currentProjectId) {
+        setIsModelUploading(true);
+        modelUploadPromiseRef.current = (async () => {
+          try {
+            const userId = user?.id;
+            if (!userId) throw new Error("Not authenticated");
+            const pathname = `models/${userId}/${Date.now()}-${file.name}`;
+            const blob = await upload(pathname, file, {
+              access: "public",
+              handleUploadUrl: "/api/upload",
+            });
+            await fetch(`/api/projects/${currentProjectId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ modelBlobUrl: blob.url, modelFilename: file.name }),
+            });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "";
+            if (msg.toLowerCase().includes("storage limit") || msg.toLowerCase().includes("maximum size")) {
+              setLayerMessage("Storage limit reached — delete a project to free space.");
+            } else {
+              setLayerMessage("Model upload failed. Your work is local-only until you retry.");
+            }
+          } finally {
+            setIsModelUploading(false);
+          }
+        })();
+      }
     } catch (error) {
       if (loadId !== loadIdRef.current) return;
       const reason = error instanceof Error ? error.message : "Unknown error";
@@ -2238,12 +2191,12 @@ export function GlbViewer() {
   };
 
   const updatePointLight = (id: string, patch: Partial<PointLightConfig>) => {
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
     setPointLights((prev) => prev.map((l) => (l.id === id ? sanitizePointLight({ ...l, ...patch }, 0) : l)));
   };
 
   const addPointLight = () => {
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
     setPointLights((prev) => {
       if (prev.length >= MAX_POINT_LIGHTS) return prev;
       return [...prev, createDefaultPointLight(prev.length)];
@@ -2251,7 +2204,7 @@ export function GlbViewer() {
   };
 
   const removePointLight = (id: string) => {
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
     setPointLights((prev) => {
       if (prev.length === 1) return prev;
       return prev.filter((l) => l.id !== id);
@@ -2304,7 +2257,7 @@ export function GlbViewer() {
         setAnimationTracks(remapped);
       }
 
-      setHasUnsavedChanges(true);
+      setHasUnsavedChanges(true); scheduleAutosave();
       return { ok: true, message: "Config applied." };
     } catch (error) {
       return { ok: false, message: `Invalid config: ${error instanceof Error ? error.message : "Unknown error"}` };
@@ -2317,7 +2270,97 @@ export function GlbViewer() {
     setConfigMessage(result.message);
   };
 
-  const saveToFile = () => {
+  const captureThumbnail = (): string | null => {
+    const source = document.querySelector("canvas");
+    if (!source) return null;
+    try {
+      const thumb = document.createElement("canvas");
+      thumb.width = 400;
+      thumb.height = 225;
+      thumb.getContext("2d")!.drawImage(source, 0, 0, 400, 225);
+      return thumb.toDataURL("image/jpeg", 0.7);
+    } catch {
+      return null;
+    }
+  };
+
+  // Captures and uploads only the thumbnail — called silently on navigation away.
+  const saveThumbnailOnly = async () => {
+    if (!currentProjectId || !hasModel) return;
+    const thumbnailDataUrl = captureThumbnail();
+    if (!thumbnailDataUrl) return;
+    // Build config so pinnedCameraView (and any other unsaved changes) are persisted on close
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) {
+      payload.animationTracks = animationTracks.map((track) => ({
+        ...track,
+        layerName: getLayerName(track.layerId),
+      }));
+    }
+    try {
+      await fetch(`/api/projects/${currentProjectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ thumbnailDataUrl, config: payload }),
+      });
+    } catch { /* non-fatal */ }
+  };
+
+  const saveToDb = async () => {
+    if (!currentProjectId) return;
+    setLayerMessage("Saving…");
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) {
+      payload.animationTracks = animationTracks.map((track) => ({
+        ...track,
+        layerName: getLayerName(track.layerId),
+      }));
+    }
+    const thumbnailDataUrl = captureThumbnail();
+    await fetch(`/api/projects/${currentProjectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: payload, ...(thumbnailDataUrl ? { thumbnailDataUrl } : {}) }),
+    });
+    setHasUnsavedChanges(false);
+    setLayerMessage("Saved.");
+  };
+
+  // Silent autosave — no thumbnail, no "Saving…" flash.
+  const autoSaveConfigOnly = async () => {
+    if (!currentProjectId || !hasUnsavedChangesRef.current || isModelUploadingRef.current) return;
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) {
+      payload.animationTracks = animationTracks.map((track) => ({
+        ...track,
+        layerName: getLayerName(track.layerId),
+      }));
+    }
+    try {
+      await fetch(`/api/projects/${currentProjectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: payload }),
+      });
+      setHasUnsavedChanges(false);
+      setLayerMessage("Autosaved");
+      setTimeout(() => setLayerMessage((m) => m === "Autosaved" ? null : m), 2000);
+    } catch { /* non-fatal — fallback interval will retry */ }
+  };
+
+  // Debounces autosave: resets the 10s timer on every call.
+  const scheduleAutosave = () => {
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => void autoSaveConfigOnlyRef.current(), 10_000);
+  };
+
+  const exportConfigToFile = () => {
     const payload: ConfigPayload = { settings, pointLights };
     if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
     if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
@@ -2337,8 +2380,6 @@ export function GlbViewer() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    setHasUnsavedChanges(false);
-    setLayerMessage("Saved.");
   };
 
   const downloadAnimationJson = () => {
@@ -2444,6 +2485,15 @@ export function GlbViewer() {
     }
   };
 
+  // Navigate back to projects, guarding against in-progress model upload.
+  const navigateToProjects = () => {
+    if (isModelUploading) {
+      setUploadWarningOpen(true);
+      return;
+    }
+    guardUnsaved(() => { setIsNavigating(true); void saveThumbnailOnly().then(() => router.push("/app")); });
+  };
+
   const copyConfig = async () => {
     try {
       await navigator.clipboard.writeText(configText);
@@ -2466,7 +2516,7 @@ export function GlbViewer() {
     }
     setConfigText(saved);
     setConfigDirty(true);
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
     setConfigMessage("Saved config loaded into editor. Click Apply.");
   };
 
@@ -2540,6 +2590,15 @@ export function GlbViewer() {
       ...t,
       keyframes: [...t.keyframes],
     }));
+    // Capture current camera so undo/redo restores the view
+    const cam = cameraRef.current;
+    const ctrl = orbitControlsRef.current;
+    const cameraView: CameraView | undefined = cam && ctrl ? {
+      position: [cam.position.x, cam.position.y, cam.position.z],
+      target: [ctrl.target.x, ctrl.target.y, ctrl.target.z],
+      fov: cam.fov,
+      zoom: cam.zoom,
+    } : undefined;
     const base = historyEntriesRef.current.slice(0, historyIndexRef.current + 1);
     let next = [
       ...base,
@@ -2548,6 +2607,7 @@ export function GlbViewer() {
         label,
         snapshot,
         tracks,
+        cameraView,
       },
     ];
     const maxEntries = 40;
@@ -2555,8 +2615,79 @@ export function GlbViewer() {
       next = next.slice(next.length - maxEntries);
     }
     commitHistoryState(next, next.length - 1);
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
   };
+
+  const setTracksWithHistory = (tracks: AnimationTrack[]) => {
+    setAnimationTracks(tracks);
+    pushHistory("AI animation", tracks);
+  };
+
+  const openProject = async (project: { id: string; model_blob_url: string | null; model_filename: string | null }) => {
+    if (!project.model_blob_url) return;
+    try {
+      const [modelRes, projRes] = await Promise.all([
+        fetch(project.model_blob_url),
+        fetch(`/api/projects/${project.id}`),
+      ]);
+      const blob = await modelRes.blob();
+      const file = new File([blob], project.model_filename ?? "model.glb", { type: blob.type });
+      const { project: full } = await projRes.json() as { project: { config: ConfigPayload } };
+      await loadFile(file, { projectId: project.id, config: full.config ?? {} as ConfigPayload });
+    } catch { /* show nothing — loadFile already handles errors */ }
+  };
+
+  // Auto-save project config (debounced 2s) whenever tracks or timeline length change
+  useEffect(() => {
+    if (!currentProjectId) return;
+    const payload: ConfigPayload = { settings, pointLights };
+    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
+    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
+    if (animationTracks.length > 0) {
+      payload.animationTracks = animationTracks.map((t) => ({ ...t, layerName: getLayerName(t.layerId) }));
+    }
+    const timer = setTimeout(() => {
+      void fetch(`/api/projects/${currentProjectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: payload }),
+      });
+    }, 2000);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animationTracks, timelineLengthVh, currentProjectId]);
+
+  // Focus project name input when editing starts
+  useEffect(() => {
+    if (editingProjectName) {
+      projectNameInputRef.current?.select();
+    }
+  }, [editingProjectName]);
+
+  // Auto-load project from URL param on mount
+  useEffect(() => {
+    if (!initialProjectId) return;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/projects/${initialProjectId}`);
+        if (!res.ok) return;
+        const { project } = await res.json() as { project: { id: string; name: string; is_public: boolean; model_blob_url: string | null; model_filename: string | null; config: ConfigPayload } };
+        if (!project) return;
+        setCurrentProjectName(project.name ?? null);
+        setIsProjectPublic(project.is_public ?? false);
+        if (!project.model_blob_url) {
+          setCurrentProjectId(initialProjectId);
+          setIsProjectLoading(false);
+          setUploadModalOpen(true);
+          return;
+        }
+        await openProject(project);
+      } finally {
+        setIsProjectLoading(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const applyLayerSnapshot = (snapshot: LayerSnapshot) => {
     const deleted = new Set<string>();
@@ -2585,7 +2716,7 @@ export function GlbViewer() {
       setSelectedLayerId(null);
     }
     refreshLayerItemsFromScene();
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
   };
 
   const jumpToHistoryIndex = (index: number) => {
@@ -2596,6 +2727,9 @@ export function GlbViewer() {
     applyLayerSnapshot(entry.snapshot);
     setAnimationTracks(entry.tracks ?? []);
     setIsolationStack([]);
+    if (entry.cameraView) {
+      applyCameraView(entry.cameraView);
+    }
   };
 
   const undoLayerChange = () => {
@@ -2671,7 +2805,7 @@ export function GlbViewer() {
 
       if (mod && key === "s") {
         event.preventDefault();
-        saveToFile();
+        if (!isModelUploadingRef.current) void saveToDbRef.current();
         return;
       }
 
@@ -2964,7 +3098,7 @@ export function GlbViewer() {
     object.position[axis] = value;
     object.updateMatrixWorld();
     syncLayerTransform(layerId);
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
   };
 
   const updateLayerUniformScale = (layerId: string, rawValue: string) => {
@@ -2974,7 +3108,7 @@ export function GlbViewer() {
     if (Number.isNaN(value)) return;
     setObjectUniformScaleFromCenter(object, value);
     syncLayerTransform(layerId);
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
   };
 
   const updateLayerRotationCoordinate = (
@@ -2995,7 +3129,7 @@ export function GlbViewer() {
     };
     setObjectRotationFromCenter(object, nextRotation);
     syncLayerTransform(layerId);
-    setHasUnsavedChanges(true);
+    setHasUnsavedChanges(true); scheduleAutosave();
   };
 
   const updateLayerOpacity = (layerId: string, rawValue: string) => {
@@ -3544,7 +3678,7 @@ export function GlbViewer() {
       <div className="absolute inset-0">
         {hasModel ? (
           <>
-          <Canvas onPointerMissed={viewMode === "animate" ? handleCanvasPointerMissed : undefined}>
+          <Canvas gl={{ preserveDrawingBuffer: true }} onPointerMissed={viewMode === "animate" ? handleCanvasPointerMissed : undefined}>
             <PerspectiveCamera
               ref={cameraRef}
               makeDefault
@@ -3602,7 +3736,7 @@ export function GlbViewer() {
               />
             )}
 
-            <Bounds fit clip={false} observe={false} margin={1.1}>
+            <Bounds fit={!pinnedCameraView} clip={false} observe={false} margin={1.1}>
               <Center>
                 <primitive
                   object={modelScene}
@@ -3680,15 +3814,19 @@ export function GlbViewer() {
         )}
       </div>
 
-      {/* ── Wordmark + UserButton — always visible when no model / in preview ─── */}
+      {/* ── Logo pill — always visible when no model / in preview ─── */}
       {(!hasModel || viewMode === "preview") && (
         <div
-          className="absolute left-4 top-3 z-[60] flex items-center gap-2"
+          className="absolute left-4 top-3 z-[60]"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <span className="text-sm font-semibold tracking-tight text-foreground/80">
-            Animascroll
-          </span>
+          <button
+            type="button"
+            className="inline-flex h-8 items-center rounded-lg border border-border/40 bg-card/90 px-3 backdrop-blur-sm hover:bg-card transition-colors"
+            onClick={() => { setIsNavigating(true); router.push("/app"); }}
+          >
+            <Logo variant="light" markHeight="h-4" />
+          </button>
         </div>
       )}
 
@@ -3698,9 +3836,57 @@ export function GlbViewer() {
           className="absolute left-4 top-3 z-[60] flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <span className="px-2 text-xs font-semibold tracking-tight text-foreground/60 select-none">
-            Animascroll
-          </span>
+          <button
+            type="button"
+            className="flex items-center rounded-md px-2 hover:bg-muted/60 transition-colors"
+            onPointerDown={(e) => { e.stopPropagation(); navigateToProjects(); }}
+          >
+            <Logo variant="light" markHeight="h-4" />
+          </button>
+
+          {/* Editable project name */}
+          {currentProjectName !== null && (
+            <>
+              <div className="mx-1 h-4 w-px bg-border/60 shrink-0" />
+              {editingProjectName ? (
+                <input
+                  ref={projectNameInputRef}
+                  className="max-w-[160px] bg-transparent text-sm font-medium text-foreground outline-none border-b border-zinc-500 focus:border-white px-1 py-0.5"
+                  value={projectNameDraft}
+                  onChange={(e) => setProjectNameDraft(e.target.value)}
+                  onBlur={async () => {
+                    setEditingProjectName(false);
+                    const trimmed = projectNameDraft.trim();
+                    if (trimmed && trimmed !== currentProjectName && currentProjectId) {
+                      setCurrentProjectName(trimmed);
+                      await fetch(`/api/projects/${currentProjectId}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: trimmed }),
+                      });
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                    if (e.key === "Escape") { setEditingProjectName(false); }
+                    e.stopPropagation();
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="max-w-[160px] truncate px-1.5 py-0.5 text-sm font-medium text-zinc-300 hover:text-white rounded hover:bg-muted/60 transition-colors text-left"
+                  title="Click to rename"
+                  onClick={(e) => { e.stopPropagation(); setProjectNameDraft(currentProjectName ?? ""); setEditingProjectName(true); }}
+                >
+                  {currentProjectName}
+                </button>
+              )}
+            </>
+          )}
+
           <div className="mx-0.5 h-4 w-px bg-border/60" />
           {/* File menu */}
           <div className="relative">
@@ -3718,30 +3904,12 @@ export function GlbViewer() {
               <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg">
                 <button
                   type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); guardUnsaved(() => setUploadModalOpen(true)); }}
-                >
-                  <Upload className="mr-2 h-4 w-4" />
-                  Upload Model…
-                </button>
-                <div className="my-1 border-t border-border" />
-                <button
-                  type="button"
                   className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
                   disabled={!hasModel}
                   onClick={() => { setFileMenuOpen(false); exportCurrentModel(); }}
                 >
                   <Download className="mr-2 h-4 w-4" />
                   Export Model
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={animationTracks.length === 0}
-                  onClick={() => { setFileMenuOpen(false); downloadAnimationJson(); }}
-                >
-                  <Download className="mr-2 h-4 w-4" />
-                  Download Animation JSON
                 </button>
                 <button
                   type="button"
@@ -3756,11 +3924,20 @@ export function GlbViewer() {
                 <button
                   type="button"
                   className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel}
-                  onClick={() => { setFileMenuOpen(false); saveToFile(); }}
+                  disabled={!currentProjectId || isModelUploading}
+                  onClick={() => { setFileMenuOpen(false); void saveToDb(); }}
                 >
                   <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save</span>
                   <kbd className="font-sans text-xs text-muted-foreground">Ctrl S</kbd>
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={!hasModel}
+                  onClick={() => { setFileMenuOpen(false); exportConfigToFile(); }}
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Download Config…
                 </button>
                 <button
                   type="button"
@@ -3768,7 +3945,37 @@ export function GlbViewer() {
                   onClick={() => { setFileMenuOpen(false); guardUnsaved(loadFromFile); }}
                 >
                   <FolderOpen className="mr-2 h-4 w-4" />
-                  Load…
+                  Load Config…
+                </button>
+                <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => { setFileMenuOpen(false); setSkillsOpen(true); }}
+                >
+                  <Sparkles className="mr-2 h-4 w-4" />
+                  Animation Skills…
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => { setFileMenuOpen(false); setLogsOpen(true); }}
+                >
+                  <Clock3 className="mr-2 h-4 w-4" />
+                  Logs
+                </button>
+                <div className="my-1 border-t border-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => {
+                    setFileMenuOpen(false);
+                    if (isModelUploading) { setUploadWarningOpen(true); return; }
+                    navigateToProjects();
+                  }}
+                >
+                  <X className="mr-2 h-4 w-4" />
+                  Close Project
                 </button>
               </div>
             )}
@@ -3839,9 +4046,19 @@ export function GlbViewer() {
             </>
           ) : null}
 
-          {layerMessage ? (
-            <span className="pl-1 text-xs text-muted-foreground">{layerMessage}</span>
-          ) : null}
+          {(isModelUploading || layerMessage) && (
+            <>
+              <div className="mx-1 h-4 w-px bg-border/60" />
+              {isModelUploading ? (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <div className="h-3 w-3 animate-spin rounded-full border border-border border-t-primary" />
+                  Uploading model…
+                </div>
+              ) : layerMessage ? (
+                <span className="text-xs text-muted-foreground">{layerMessage}</span>
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
 
@@ -3874,10 +4091,24 @@ export function GlbViewer() {
         <div className="pointer-events-none absolute inset-0 z-30 border-2 border-dashed border-primary/70 bg-primary/10" />
       ) : null}
 
-      {!hasModel ? <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div> : null}
+      {isNavigating && (
+        <div className="absolute inset-0 z-[200] flex flex-col items-center justify-center gap-4 bg-zinc-950/80 backdrop-blur-sm">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-primary" />
+          <p className="text-sm text-zinc-400">Saving…</p>
+        </div>
+      )}
+
+      {isProjectLoading ? (
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-zinc-950">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-primary" />
+          <p className="text-sm text-zinc-400">Loading project…</p>
+        </div>
+      ) : !hasModel ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div>
+      ) : null}
 
       {hasModel && viewMode === "animate" ? (
-        <aside className="absolute left-4 top-14 z-50 w-fit space-y-2">
+        <aside className="absolute left-4 top-16 z-50 w-fit space-y-2">
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
               <Button
@@ -3899,7 +4130,7 @@ export function GlbViewer() {
       ) : null}
 
       {/* ── UserButton — always visible when mode switcher is hidden ──────── */}
-      {(!hasModel || viewMode === "preview") && (
+      {(!hasModel || viewMode === "preview") && !isProjectLoading && (
         <div
           className="absolute right-4 top-3 z-[60]"
           onPointerDown={(e) => e.stopPropagation()}
@@ -3911,18 +4142,30 @@ export function GlbViewer() {
       {/* ── Navigate / Animate / Preview mode toggle — top-right ─────────── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className="absolute right-4 top-3 z-50 flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          className="absolute right-4 top-3 z-[60] flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
+          {viewMode === "animate" && modelScene ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+              title="Fit camera to model and save as preview camera"
+              onClick={fitModelToCamera}
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </Button>
+          ) : null}
           {viewMode === "animate" ? (
             <Button
               size="sm"
               variant={pinnedCameraView ? "outline" : "secondary"}
-              className={
+              className={cn(
+                "h-7",
                 pinnedCameraView
                   ? "border-primary/50 text-primary hover:bg-primary/10"
                   : "text-muted-foreground"
-              }
+              )}
               title={pinnedCameraView ? "Update saved preview camera" : "Save current view as preview camera"}
               onClick={() => {
                 const controls = orbitControlsRef.current;
@@ -3934,6 +4177,7 @@ export function GlbViewer() {
                   fov: camera.fov,
                   zoom: camera.zoom,
                 });
+                setHasUnsavedChanges(true); scheduleAutosave();
               }}
             >
               <Camera className="mr-1.5 h-3.5 w-3.5" />
@@ -3956,6 +4200,7 @@ export function GlbViewer() {
           ) : null}
           <Button
             size="sm"
+            className="h-7"
             variant={viewMode === "animate" ? "default" : "secondary"}
             onClick={enterAnimateMode}
           >
@@ -3964,12 +4209,117 @@ export function GlbViewer() {
           <Button
             size="sm"
             variant="secondary"
-            className="text-muted-foreground hover:text-foreground"
+            className="h-7 text-muted-foreground hover:text-foreground"
             disabled={!hasModel}
             onClick={enterPreviewMode}
           >
             Preview
           </Button>
+
+          {/* Share button */}
+          {currentProjectId && (
+            <>
+              <div className="mx-0.5 h-4 w-px bg-border/60" />
+              <div className="relative">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-sm font-medium transition-colors hover:bg-muted/80",
+                    shareMenuOpen && "bg-muted/80",
+                    isProjectPublic && "text-emerald-400"
+                  )}
+                  onPointerDown={(e) => { e.stopPropagation(); setShareMenuOpen((v) => !v); }}
+                >
+                  <Link2 className="h-3.5 w-3.5" />
+                  Share
+                  {isProjectPublic && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />}
+                </button>
+
+                {shareMenuOpen && (
+                  <div
+                    className="absolute right-0 top-full z-[200] mt-1 w-72 rounded-lg border border-border/60 bg-card p-3 shadow-xl"
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    {isProjectPublic ? (
+                      <>
+                        <p className="mb-2 text-xs text-zinc-400">Anyone with the link can view this animation.</p>
+                        <div className="mb-2.5 flex items-center gap-1.5">
+                          <input
+                            readOnly
+                            className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 outline-none"
+                            value={`${window.location.origin}/share/${currentProjectId}`}
+                            onFocus={(e) => e.target.select()}
+                          />
+                          <button
+                            type="button"
+                            className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-600 transition-colors"
+                            onClick={async () => {
+                              await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
+                              setShareCopied(true);
+                              setTimeout(() => setShareCopied(false), 2000);
+                            }}
+                          >
+                            {shareCopied ? "Copied!" : "Copy"}
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={shareLoading}
+                          className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 transition-colors"
+                          onClick={async () => {
+                            setShareLoading(true);
+                            try {
+                              await fetch(`/api/projects/${currentProjectId}`, {
+                                method: "PATCH",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ isPublic: false }),
+                              });
+                              setIsProjectPublic(false);
+                              setShareMenuOpen(false);
+                            } finally {
+                              setShareLoading(false);
+                            }
+                          }}
+                        >
+                          {shareLoading ? "Saving…" : "Stop sharing"}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="mb-3 text-xs text-zinc-400">
+                          Get a public link anyone can view — no sign-in required.
+                        </p>
+                        <button
+                          type="button"
+                          disabled={shareLoading}
+                          className="flex w-full items-center justify-center gap-2 rounded bg-white px-3 py-1.5 text-sm font-medium text-black hover:bg-zinc-200 disabled:opacity-60 transition-colors"
+                          onClick={async () => {
+                            setShareLoading(true);
+                            try {
+                              await fetch(`/api/projects/${currentProjectId}`, {
+                                method: "PATCH",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ isPublic: true }),
+                              });
+                              setIsProjectPublic(true);
+                              await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
+                              setShareCopied(true);
+                              setTimeout(() => setShareCopied(false), 2000);
+                            } finally {
+                              setShareLoading(false);
+                            }
+                          }}
+                        >
+                          {shareLoading ? "Enabling…" : "Enable sharing & copy link"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           <div className="mx-0.5 h-4 w-px bg-border/60" />
           <div className="flex items-center px-0.5">
             <UserButton />
@@ -3978,7 +4328,7 @@ export function GlbViewer() {
       ) : null}
 
       {hasModel && viewMode !== "preview" ? (
-        <aside className="absolute right-4 top-14 z-50 w-fit space-y-2">
+        <aside className="absolute right-4 top-16 z-50 w-fit space-y-2">
 
           <Card className="bg-card/95 backdrop-blur">
             <CardHeader className="py-3">
@@ -4204,7 +4554,7 @@ export function GlbViewer() {
                     onChange={(e) => {
                       setConfigText(e.target.value);
                       setConfigDirty(true);
-                      setHasUnsavedChanges(true);
+                      setHasUnsavedChanges(true); scheduleAutosave();
                       setConfigMessage(null);
                     }}
                     rows={16}
@@ -4252,6 +4602,43 @@ export function GlbViewer() {
               </CardContent>
             ) : null}
           </Card>
+
+          <AiChatPanel
+            layerItems={layerItems}
+            animationTracks={animationTracks}
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            setAnimationTracks={setTracksWithHistory as unknown as (t: any[]) => void}
+            timelineLengthVh={timelineLengthVh}
+            setTimelineLengthVh={(vh) => { setTimelineLengthVh(vh); setHasUnsavedChanges(true); scheduleAutosave(); }}
+            settings={settings}
+            patchSettings={patchSettings}
+            pointLights={pointLights}
+            setPointLights={(lights) => { setPointLights(lights); setHasUnsavedChanges(true); scheduleAutosave(); }}
+            projectId={currentProjectId}
+            addLog={addLog}
+            onOperationsApplied={fitModelToCamera}
+            onExplodedView={(centroid, maxOffset) => {
+              const camera = cameraRef.current;
+              const controls = orbitControlsRef.current;
+              if (!camera || !controls) return;
+              // Fit camera to the expected exploded radius (centroid + maxOffset in all directions)
+              const fovRad = THREE.MathUtils.degToRad(camera.fov);
+              const distance = (maxOffset / Math.tan(fovRad / 2)) * 2.0;
+              const direction = new THREE.Vector3()
+                .subVectors(camera.position, controls.target)
+                .normalize();
+              camera.position.set(centroid.x, centroid.y, centroid.z).addScaledVector(direction, distance);
+              controls.target.set(centroid.x, centroid.y, centroid.z);
+              controls.update();
+              setPinnedCameraView({
+                position: [camera.position.x, camera.position.y, camera.position.z],
+                target: [controls.target.x, controls.target.y, controls.target.z],
+                fov: camera.fov,
+                zoom: camera.zoom,
+              });
+              setHasUnsavedChanges(true); scheduleAutosave();
+            }}
+          />
         </aside>
       ) : null}
 
@@ -5037,7 +5424,7 @@ export function GlbViewer() {
       {uploadModalOpen ? (
         <div
           className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60"
-          onPointerDown={() => setUploadModalOpen(false)}
+          onPointerDown={() => { if (!hasModel) router.push("/app"); else setUploadModalOpen(false); }}
         >
           <div
             className="w-[420px] rounded-xl border border-border bg-card p-6 shadow-2xl"
@@ -5048,7 +5435,7 @@ export function GlbViewer() {
               <button
                 type="button"
                 className="rounded p-1 hover:bg-muted"
-                onClick={() => setUploadModalOpen(false)}
+                onClick={() => { if (!hasModel) router.push("/app"); else setUploadModalOpen(false); }}
               >
                 <X className="h-4 w-4" />
               </button>
@@ -5088,7 +5475,7 @@ export function GlbViewer() {
               <Button
                 size="sm"
                 onClick={() => {
-                  saveToFile();
+                  void saveToDb();
                   setSaveConfirmOpen(false);
                   pendingSaveAction?.();
                   setPendingSaveAction(null);
@@ -5096,6 +5483,34 @@ export function GlbViewer() {
               >
                 <Save className="mr-2 h-4 w-4" />
                 Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Upload-in-progress warning ───────────────────────────── */}
+      {uploadWarningOpen ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60">
+          <div className="w-[380px] rounded-xl border border-border bg-card p-6 shadow-2xl">
+            <h2 className="mb-1 text-base font-semibold">Model still uploading</h2>
+            <p className="mb-5 text-sm text-muted-foreground">
+              Your model hasn&apos;t finished uploading yet. Leaving now will lose the model and any changes made to this project.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setUploadWarningOpen(false)}
+              >
+                Wait for upload
+              </Button>
+              <Button
+                size="sm"
+                variant="default"
+                onClick={() => { setUploadWarningOpen(false); setIsNavigating(true); router.push("/app"); }}
+              >
+                Close anyway
               </Button>
             </div>
           </div>
@@ -5110,6 +5525,87 @@ export function GlbViewer() {
         className="hidden"
         onChange={onJsonFilePick}
       />
+
+      {/* ── Logs modal ───────────────────────────────────────────── */}
+      {logsOpen ? (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
+          onPointerDown={() => setLogsOpen(false)}
+        >
+          <div
+            className="flex h-[70vh] w-[640px] flex-col rounded-xl border border-border bg-card shadow-2xl"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h2 className="text-sm font-semibold">Activity Log</h2>
+              <div className="flex items-center gap-2">
+                {logEvents.length > 0 && (
+                  <button
+                    type="button"
+                    className="rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                    onClick={() => setLogEvents([])}
+                  >
+                    Clear
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="rounded p-1 hover:bg-muted"
+                  onClick={() => setLogsOpen(false)}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 font-mono text-xs">
+              {logEvents.length === 0 ? (
+                <p className="p-4 text-center text-muted-foreground">No activity yet.</p>
+              ) : (
+                logEvents.map((e) => (
+                  <div key={e.id} className="flex gap-3 border-b border-border/40 px-2 py-1.5 last:border-0">
+                    <span className="shrink-0 tabular-nums text-muted-foreground">
+                      {e.ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                    </span>
+                    <span className="whitespace-pre-wrap break-all">{e.msg}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Skills modal ───────────────────────────────────────────── */}
+      {skillsOpen && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
+          onPointerDown={() => setSkillsOpen(false)}
+        >
+          <div
+            className="flex flex-col rounded-xl border border-border bg-card shadow-2xl overflow-hidden"
+            style={{ width: 760, maxHeight: "80vh" }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-zinc-400" />
+                <h2 className="text-sm font-semibold">Animation Skills</h2>
+              </div>
+              <button
+                type="button"
+                className="rounded p-1 hover:bg-muted"
+                onClick={() => setSkillsOpen(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <SkillsManager mode="modal" />
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

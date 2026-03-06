@@ -8,3 +8,4 @@ tsconfig.tsbuildinfo
 .claude/
 .env.local
 .env*.local
+public/temp/
