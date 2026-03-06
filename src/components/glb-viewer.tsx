@@ -40,6 +40,7 @@ import {
   Move,
   Sparkles,
   Link2,
+  HelpCircle,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
@@ -62,6 +63,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import SkillsManager from "@/components/skills-manager";
 import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animation-html";
+import ReactMarkdown from "react-markdown";
 
 type ViewerSettings = {
   backgroundColor: string;
@@ -784,6 +786,43 @@ function getLayerItems(scene: THREE.Object3D): {
   return { items, objectMap };
 }
 
+function HelpContent({ md }: { md: string }) {
+  return (
+    <ReactMarkdown
+      components={{
+        h1: ({ children }) => <h1 className="text-xl font-bold text-zinc-100 mb-4 mt-2">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-base font-semibold text-zinc-100 mt-8 mb-3 border-b border-zinc-800 pb-1">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-sm font-semibold text-zinc-200 mt-5 mb-2">{children}</h3>,
+        p: ({ children }) => <p className="text-zinc-300 text-sm leading-relaxed mb-3">{children}</p>,
+        ul: ({ children }) => <ul className="list-disc list-inside space-y-1 mb-3 text-zinc-300 text-sm">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal list-inside space-y-1 mb-3 text-zinc-300 text-sm">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        strong: ({ children }) => <strong className="text-zinc-100 font-semibold">{children}</strong>,
+        code: ({ children, className }) =>
+          className ? (
+            <code className="block bg-zinc-800 border border-zinc-700 rounded-lg p-3 text-xs text-emerald-400 overflow-x-auto mb-3 whitespace-pre">{children}</code>
+          ) : (
+            <code className="bg-zinc-800 text-emerald-400 rounded px-1 py-0.5 text-xs">{children}</code>
+          ),
+        pre: ({ children }) => <pre className="mb-3">{children}</pre>,
+        hr: () => <hr className="border-zinc-800 my-6" />,
+        table: ({ children }) => (
+          <div className="overflow-x-auto mb-4">
+            <table className="w-full text-sm border-collapse">{children}</table>
+          </div>
+        ),
+        thead: ({ children }) => <thead>{children}</thead>,
+        th: ({ children }) => <th className="text-left text-zinc-200 font-medium px-3 py-2 border-b border-zinc-700">{children}</th>,
+        td: ({ children }) => <td className="text-zinc-300 px-3 py-2 border-b border-zinc-800">{children}</td>,
+        a: ({ children, href }) => <a href={href} className="text-blue-400 hover:underline">{children}</a>,
+        blockquote: ({ children }) => <blockquote className="border-l-2 border-zinc-600 pl-4 italic text-zinc-400 mb-3">{children}</blockquote>,
+      }}
+    >
+      {md}
+    </ReactMarkdown>
+  );
+}
+
 export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -813,6 +852,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [editMenuOpen, setEditMenuOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpMd, setHelpMd] = useState<string | null>(null);
   const [logEvents, setLogEvents] = useState<{ id: string; ts: Date; msg: string }[]>([]);
   const addLog = (msg: string) =>
     setLogEvents((prev) => [{ id: crypto.randomUUID(), ts: new Date(), msg }, ...prev]);
@@ -3964,6 +4005,18 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                   <Clock3 className="mr-2 h-4 w-4" />
                   Logs
                 </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => {
+                    setFileMenuOpen(false);
+                    if (!helpMd) fetch("/help.md").then((r) => r.text()).then(setHelpMd);
+                    setHelpOpen(true);
+                  }}
+                >
+                  <HelpCircle className="mr-2 h-4 w-4" />
+                  Help
+                </button>
                 <div className="my-1 border-t border-border" />
                 <button
                   type="button"
@@ -5576,6 +5629,39 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       ) : null}
 
       {/* ── Skills modal ───────────────────────────────────────────── */}
+      {/* ── Help modal ─────────────────────────────────────────────── */}
+      {helpOpen && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
+          onPointerDown={() => setHelpOpen(false)}
+        >
+          <div
+            className="flex flex-col rounded-xl border border-border bg-card shadow-2xl overflow-hidden"
+            style={{ width: 740, maxHeight: "82vh" }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <HelpCircle className="h-4 w-4 text-zinc-400" />
+                <h2 className="text-sm font-semibold">Help</h2>
+              </div>
+              <button
+                type="button"
+                className="rounded p-1 hover:bg-muted"
+                onClick={() => setHelpOpen(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-8 py-6">
+              {helpMd ? <HelpContent md={helpMd} /> : (
+                <p className="text-zinc-400 text-sm">Loading…</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {skillsOpen && (
         <div
           className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
