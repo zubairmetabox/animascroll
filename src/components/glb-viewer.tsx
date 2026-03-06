@@ -64,6 +64,7 @@ import { cn } from "@/lib/utils";
 import SkillsManager from "@/components/skills-manager";
 import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animation-html";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type ViewerSettings = {
   backgroundColor: string;
@@ -788,8 +789,7 @@ function getLayerItems(scene: THREE.Object3D): {
 
 function HelpContent({ md }: { md: string }) {
   return (
-    <ReactMarkdown
-      components={{
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
         h1: ({ children }) => <h1 className="text-xl font-bold text-zinc-100 mb-4 mt-2">{children}</h1>,
         h2: ({ children }) => <h2 className="text-base font-semibold text-zinc-100 mt-8 mb-3 border-b border-zinc-800 pb-1">{children}</h2>,
         h3: ({ children }) => <h3 className="text-sm font-semibold text-zinc-200 mt-5 mb-2">{children}</h3>,
