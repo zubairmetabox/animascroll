@@ -27,6 +27,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     modelBlobUrl?: string;
     modelFilename?: string;
     thumbnailDataUrl?: string;
+    isPublic?: boolean;
   };
 
   // Upload thumbnail to Vercel Blob if provided
@@ -50,6 +51,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       model_blob_url = COALESCE(${body.modelBlobUrl ?? null}, model_blob_url),
       model_filename = COALESCE(${body.modelFilename ?? null}, model_filename),
       thumbnail_url  = COALESCE(${thumbnailUrl}, thumbnail_url),
+      is_public      = COALESCE(${body.isPublic ?? null}, is_public),
       updated_at     = NOW()
     WHERE id = ${id} AND user_id = ${userId}
   `;

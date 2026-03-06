@@ -2,16 +2,17 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 
-// Lazy migration — no-op after first run
-async function ensureIsSampleColumn() {
+// Lazy migrations — no-op after first run
+async function ensureColumns() {
   await sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_sample BOOLEAN NOT NULL DEFAULT FALSE`.catch(() => {});
+  await sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT FALSE`.catch(() => {});
 }
 
 export async function GET() {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  await ensureIsSampleColumn();
+  await ensureColumns();
 
   const rows = await sql`
     SELECT id, name, model_filename, model_blob_url, thumbnail_url, updated_at, is_sample
