@@ -3,12 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
-import { Clock, FolderOpen, Pencil, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { Clock, FolderOpen, HelpCircle, Pencil, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import SkillsManager from "@/components/skills-manager";
+import ReactMarkdown from "react-markdown";
 
 type Project = {
   id: string;
@@ -45,6 +46,13 @@ export default function ProjectsPage() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpMd, setHelpMd] = useState<string | null>(null);
+
+  const openHelp = () => {
+    if (!helpMd) fetch("/help.md").then((r) => r.text()).then(setHelpMd);
+    setHelpOpen(true);
+  };
 
   useEffect(() => {
     fetch("/api/projects")
@@ -109,7 +117,17 @@ export default function ProjectsPage() {
       {/* Header */}
       <header className="flex items-center justify-between border-b border-border/30 px-8 py-4 shrink-0">
         <Logo variant="light" markHeight="h-6" href="/app" />
-        <UserButton />
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={openHelp}
+            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+          >
+            <HelpCircle className="h-4 w-4" />
+            Help
+          </button>
+          <UserButton />
+        </div>
       </header>
 
       {/* Tab bar */}
@@ -284,6 +302,58 @@ export default function ProjectsPage() {
           </div>
         )}
       </main>
+      )}
+
+      {/* Help modal */}
+      {helpOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) setHelpOpen(false); }}
+        >
+          <div className="flex flex-col rounded-xl border border-border/60 bg-card shadow-2xl overflow-hidden" style={{ width: 740, maxHeight: "82vh" }}>
+            <div className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <HelpCircle className="h-4 w-4 text-zinc-400" />
+                <h2 className="text-sm font-semibold">Help</h2>
+              </div>
+              <button type="button" className="rounded p-1 hover:bg-muted" onClick={() => setHelpOpen(false)}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-8 py-6">
+              {helpMd ? (
+                <ReactMarkdown
+                  components={{
+                    h1: ({ children }) => <h1 className="text-xl font-bold text-zinc-100 mb-4 mt-2">{children}</h1>,
+                    h2: ({ children }) => <h2 className="text-base font-semibold text-zinc-100 mt-8 mb-3 border-b border-zinc-800 pb-1">{children}</h2>,
+                    h3: ({ children }) => <h3 className="text-sm font-semibold text-zinc-200 mt-5 mb-2">{children}</h3>,
+                    p: ({ children }) => <p className="text-zinc-300 text-sm leading-relaxed mb-3">{children}</p>,
+                    ul: ({ children }) => <ul className="list-disc list-inside space-y-1 mb-3 text-zinc-300 text-sm">{children}</ul>,
+                    ol: ({ children }) => <ol className="list-decimal list-inside space-y-1 mb-3 text-zinc-300 text-sm">{children}</ol>,
+                    li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                    strong: ({ children }) => <strong className="text-zinc-100 font-semibold">{children}</strong>,
+                    code: ({ children, className }) =>
+                      className ? (
+                        <code className="block bg-zinc-800 border border-zinc-700 rounded-lg p-3 text-xs text-emerald-400 overflow-x-auto mb-3 whitespace-pre">{children}</code>
+                      ) : (
+                        <code className="bg-zinc-800 text-emerald-400 rounded px-1 py-0.5 text-xs">{children}</code>
+                      ),
+                    pre: ({ children }) => <pre className="mb-3">{children}</pre>,
+                    hr: () => <hr className="border-zinc-800 my-6" />,
+                    table: ({ children }) => <div className="overflow-x-auto mb-4"><table className="w-full text-sm border-collapse">{children}</table></div>,
+                    th: ({ children }) => <th className="text-left text-zinc-200 font-medium px-3 py-2 border-b border-zinc-700">{children}</th>,
+                    td: ({ children }) => <td className="text-zinc-300 px-3 py-2 border-b border-zinc-800">{children}</td>,
+                    blockquote: ({ children }) => <blockquote className="border-l-2 border-zinc-600 pl-4 italic text-zinc-400 mb-3">{children}</blockquote>,
+                  }}
+                >
+                  {helpMd}
+                </ReactMarkdown>
+              ) : (
+                <p className="text-zinc-400 text-sm">Loading…</p>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* New Project modal */}
