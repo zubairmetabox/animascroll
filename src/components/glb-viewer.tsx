@@ -859,6 +859,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [isProjectPublic, setIsProjectPublic] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
+  const [shareLoading, setShareLoading] = useState(false);
   const [configText, setConfigText] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
@@ -4025,95 +4026,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             )}
           </div>
 
-          {/* Share menu */}
-          {currentProjectId && (
-            <div className="relative">
-              <button
-                type="button"
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
-                  shareMenuOpen && "bg-muted/80",
-                  isProjectPublic && "text-emerald-400"
-                )}
-                onPointerDown={(e) => { e.stopPropagation(); setShareMenuOpen((v) => !v); setFileMenuOpen(false); setEditMenuOpen(false); }}
-              >
-                <Link2 className="h-3.5 w-3.5" />
-                Share
-                {isProjectPublic && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />}
-              </button>
-
-              {shareMenuOpen && (
-                <div
-                  className="absolute left-0 top-full z-[200] mt-1 w-72 rounded-lg border border-border/60 bg-card p-3 shadow-xl"
-                  onPointerDown={(e) => e.stopPropagation()}
-                >
-                  {isProjectPublic ? (
-                    <>
-                      <p className="mb-2 text-xs text-zinc-400">Anyone with the link can view this animation.</p>
-                      <div className="mb-2.5 flex items-center gap-1.5">
-                        <input
-                          readOnly
-                          className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 outline-none"
-                          value={`${typeof window !== "undefined" ? window.location.origin : ""}/share/${currentProjectId}`}
-                          onFocus={(e) => e.target.select()}
-                        />
-                        <button
-                          type="button"
-                          className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-600 transition-colors"
-                          onClick={async () => {
-                            await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
-                            setShareCopied(true);
-                            setTimeout(() => setShareCopied(false), 2000);
-                          }}
-                        >
-                          {shareCopied ? "Copied!" : "Copy"}
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        className="text-xs text-red-400 hover:text-red-300 transition-colors"
-                        onClick={async () => {
-                          await fetch(`/api/projects/${currentProjectId}`, {
-                            method: "PATCH",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ isPublic: false }),
-                          });
-                          setIsProjectPublic(false);
-                          setShareMenuOpen(false);
-                        }}
-                      >
-                        Stop sharing
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <p className="mb-3 text-xs text-zinc-400">
-                        Get a public link anyone can view — no sign-in required.
-                      </p>
-                      <button
-                        type="button"
-                        className="w-full rounded bg-white px-3 py-1.5 text-sm font-medium text-black hover:bg-zinc-200 transition-colors"
-                        onClick={async () => {
-                          await fetch(`/api/projects/${currentProjectId}`, {
-                            method: "PATCH",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ isPublic: true }),
-                          });
-                          setIsProjectPublic(true);
-                          await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
-                          setShareCopied(true);
-                          setTimeout(() => setShareCopied(false), 2000);
-                        }}
-                      >
-                        Enable sharing &amp; copy link
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
           {viewMode === "animate" && selectedLayerId ? (
             <>
               <div className="mx-1 h-4 w-px bg-border/60" />
@@ -4230,7 +4142,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       {/* ── Navigate / Animate / Preview mode toggle — top-right ─────────── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className="absolute right-4 top-3 z-50 flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          className="absolute right-4 top-3 z-[60] flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
           onPointerDown={(e) => e.stopPropagation()}
         >
           {viewMode === "animate" && modelScene ? (
@@ -4303,6 +4215,111 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           >
             Preview
           </Button>
+
+          {/* Share button */}
+          {currentProjectId && (
+            <>
+              <div className="mx-0.5 h-4 w-px bg-border/60" />
+              <div className="relative">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-sm font-medium transition-colors hover:bg-muted/80",
+                    shareMenuOpen && "bg-muted/80",
+                    isProjectPublic && "text-emerald-400"
+                  )}
+                  onPointerDown={(e) => { e.stopPropagation(); setShareMenuOpen((v) => !v); }}
+                >
+                  <Link2 className="h-3.5 w-3.5" />
+                  Share
+                  {isProjectPublic && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />}
+                </button>
+
+                {shareMenuOpen && (
+                  <div
+                    className="absolute right-0 top-full z-[200] mt-1 w-72 rounded-lg border border-border/60 bg-card p-3 shadow-xl"
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    {isProjectPublic ? (
+                      <>
+                        <p className="mb-2 text-xs text-zinc-400">Anyone with the link can view this animation.</p>
+                        <div className="mb-2.5 flex items-center gap-1.5">
+                          <input
+                            readOnly
+                            className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 outline-none"
+                            value={`${window.location.origin}/share/${currentProjectId}`}
+                            onFocus={(e) => e.target.select()}
+                          />
+                          <button
+                            type="button"
+                            className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-600 transition-colors"
+                            onClick={async () => {
+                              await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
+                              setShareCopied(true);
+                              setTimeout(() => setShareCopied(false), 2000);
+                            }}
+                          >
+                            {shareCopied ? "Copied!" : "Copy"}
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={shareLoading}
+                          className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 transition-colors"
+                          onClick={async () => {
+                            setShareLoading(true);
+                            try {
+                              await fetch(`/api/projects/${currentProjectId}`, {
+                                method: "PATCH",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ isPublic: false }),
+                              });
+                              setIsProjectPublic(false);
+                              setShareMenuOpen(false);
+                            } finally {
+                              setShareLoading(false);
+                            }
+                          }}
+                        >
+                          {shareLoading ? "Saving…" : "Stop sharing"}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="mb-3 text-xs text-zinc-400">
+                          Get a public link anyone can view — no sign-in required.
+                        </p>
+                        <button
+                          type="button"
+                          disabled={shareLoading}
+                          className="flex w-full items-center justify-center gap-2 rounded bg-white px-3 py-1.5 text-sm font-medium text-black hover:bg-zinc-200 disabled:opacity-60 transition-colors"
+                          onClick={async () => {
+                            setShareLoading(true);
+                            try {
+                              await fetch(`/api/projects/${currentProjectId}`, {
+                                method: "PATCH",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ isPublic: true }),
+                              });
+                              setIsProjectPublic(true);
+                              await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
+                              setShareCopied(true);
+                              setTimeout(() => setShareCopied(false), 2000);
+                            } finally {
+                              setShareLoading(false);
+                            }
+                          }}
+                        >
+                          {shareLoading ? "Enabling…" : "Enable sharing & copy link"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           <div className="mx-0.5 h-4 w-px bg-border/60" />
           <div className="flex items-center px-0.5">
             <UserButton />

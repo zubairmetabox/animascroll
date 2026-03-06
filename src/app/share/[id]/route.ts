@@ -133,13 +133,22 @@ export async function GET(
 
   const modelUrl = project.model_blob_url as string;
   const isDownload = new URL(req.url).searchParams.get("download") === "1";
-
-  // Plain HTML for download — no overlay, clean standalone file
-  const baseHtml = generateAnimationHtml(modelUrl, cfg)
-    .replace("<title>Animation</title>", `<title>${String(project.name)} — Animascroll</title>`);
+  const projectTitle = `<title>${String(project.name)} — Animascroll</title>`;
 
   if (isDownload) {
-    return new NextResponse(baseHtml, {
+    // Resolve relative URLs to absolute so the server-side fetch works
+    const origin = new URL(req.url).origin;
+    const absoluteModelUrl = modelUrl.startsWith("/") ? `${origin}${modelUrl}` : modelUrl;
+    const modelRes = await fetch(absoluteModelUrl);
+    const buffer = await modelRes.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    const dataUrl = `data:model/gltf-binary;base64,${base64}`;
+
+    // Standalone HTML — model embedded as base64, no overlay, opens from file://
+    const standaloneHtml = generateAnimationHtml(dataUrl, cfg)
+      .replace("<title>Animation</title>", projectTitle);
+
+    return new NextResponse(standaloneHtml, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Content-Disposition": `attachment; filename="animation.html"`,
@@ -147,7 +156,11 @@ export async function GET(
     });
   }
 
-  // Share view — inject scroll hint + download button before </body>
+  // Share view — pass blob URL directly (browser loads from same origin)
+  const baseHtml = generateAnimationHtml(modelUrl, cfg)
+    .replace("<title>Animation</title>", projectTitle);
+
+  // Inject scroll hint + download button before </body>
   const shareHtml = baseHtml.replace("</body>", `${SCROLL_HINT}\n${DOWNLOAD_BTN}\n</body>`);
 
   return new NextResponse(shareHtml, {
