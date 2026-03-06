@@ -210,7 +210,7 @@ const DEFAULT_SETTINGS: ViewerSettings = {
   useEnvironmentMap: true,
   environmentPreset: "neutral",
   environmentIntensity: 1,
-  toneMappingExposure: 1.5,
+  toneMappingExposure: 1.0,
 };
 
 function createDefaultPointLight(index: number): PointLightConfig {
@@ -293,32 +293,59 @@ function RendererConfig({ exposure }: { exposure: number }) {
   return null;
 }
 
+// Module-level so loadFile can apply the env map directly to new model materials.
+const _pmremEnvRef: { texture: THREE.Texture | null } = { texture: null };
+
+function applyEnvMapToScene(scene: THREE.Object3D, texture: THREE.Texture) {
+  scene.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) {
+      const m = mat as THREE.MeshStandardMaterial;
+      if (!m.isMeshStandardMaterial) continue;
+      m.envMap = texture;
+      // Ensure env map contributes — bump to 1 if 0/unset (some exporters leave it at 0)
+      if (!m.envMapIntensity) {
+        m.envMapIntensity = 1;
+      }
+      // Reset full glass transmission on non-metallic materials only.
+      // transmission=1 on fabric/plastic is an export bug (e.g. NASA models).
+      // Metallic parts may legitimately use partial transmission for surface effects.
+      const phys = m as THREE.MeshPhysicalMaterial;
+      if (phys.isMeshPhysicalMaterial && phys.transmission >= 1.0 && m.metalness < 0.5) {
+        phys.transmission = 0;
+      }
+      m.needsUpdate = true;
+    }
+  });
+}
+
 // Self-contained studio lighting — no CDN, no external files.
-// Uses Three.js RoomEnvironment (soft-box studio) to provide correct PBR/IBL.
+// Uses Three.js RoomEnvironment + PMREMGenerator to provide correct PBR/IBL.
+// Runs in useFrame (before draw) so the env map is ready on frame 1.
+// Also applies the env map directly to every material in the scene (belt+suspenders).
 function NeutralEnvironment({ intensity }: { intensity: number }) {
-  const get = useThree((state) => state.get);
-
-  useEffect(() => {
-    const { gl, scene } = get();
-    const generator = new THREE.PMREMGenerator(gl);
-    generator.compileEquirectangularShader();
-    const env = generator.fromScene(new RoomEnvironment() as Parameters<typeof generator.fromScene>[0], 0.04).texture;
+  useFrame(({ gl, scene }) => {
     const s = scene as THREE.Scene;
-    s.environment = env;
-    generator.dispose();
-    return () => {
-      env.dispose();
-      s.environment = null;
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [get]);
-
-  useFrame(() => {
-    const s = get().scene as THREE.Scene;
+    if (!_pmremEnvRef.texture) {
+      const generator = new THREE.PMREMGenerator(gl);
+      _pmremEnvRef.texture = generator.fromScene(new RoomEnvironment(), 0.04).texture;
+      generator.dispose();
+      // Set on scene for any materials that use scene.environment
+      s.environment = _pmremEnvRef.texture;
+      // Also apply directly so materials that compiled without envMap get it too
+      applyEnvMapToScene(s, _pmremEnvRef.texture);
+    }
     if (s.environmentIntensity !== intensity) {
       s.environmentIntensity = intensity;
     }
   });
+
+  useEffect(() => () => {
+    _pmremEnvRef.texture?.dispose();
+    _pmremEnvRef.texture = null;
+  }, []);
 
   return null;
 }
@@ -633,7 +660,7 @@ function clampSettings(raw: ViewerSettings): ViewerSettings {
     directionalIntensity: THREE.MathUtils.clamp(raw.directionalIntensity, 0, 5),
     environmentIntensity: THREE.MathUtils.clamp(raw.environmentIntensity ?? 1, 0, 3),
     environmentPreset: ENV_PRESETS.includes(raw.environmentPreset as EnvPreset) ? raw.environmentPreset : "neutral",
-    toneMappingExposure: THREE.MathUtils.clamp(raw.toneMappingExposure ?? 1.5, 0.1, 5),
+    toneMappingExposure: THREE.MathUtils.clamp(raw.toneMappingExposure ?? 1.0, 0.1, 5),
   };
 }
 
@@ -2158,6 +2185,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       // ── Apply scene (same logic for all formats) ──────────────────────────
       if (loadId !== loadIdRef.current) return;
+
+
+      // Apply env map directly to materials if PMREM texture already exists (fixes dark PBR models)
+      if (_pmremEnvRef.texture) {
+        applyEnvMapToScene(loadedScene, _pmremEnvRef.texture);
+      }
       setModelScene(loadedScene);
       posthog.capture("model_uploaded");
       rotationPivotRef.current.clear();
@@ -3861,15 +3894,21 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             <color attach="background" args={[settings.backgroundColor]} />
             <RendererConfig exposure={settings.toneMappingExposure} />
 
-            {settings.useEnvironmentMap && settings.environmentPreset === "neutral" ? (
+            {/* NeutralEnvironment always runs as base IBL — instant, no CDN.
+                CDN preset (if chosen) overrides scene.environment once loaded. */}
+            {settings.useEnvironmentMap && (
               <NeutralEnvironment intensity={settings.environmentIntensity} />
-            ) : settings.useEnvironmentMap ? (
+            )}
+            {settings.useEnvironmentMap && settings.environmentPreset !== "neutral" && (
               <Environment
                 preset={settings.environmentPreset as Exclude<EnvPreset, "neutral">}
                 background={false}
                 environmentIntensity={settings.environmentIntensity}
               />
-            ) : null}
+            )}
+            {/* Hemisphere fill — ensures no model ever goes fully black regardless of material type.
+                intensity=3 in physical lux is ~indoor ambient; just enough to reveal dark-colored models. */}
+            <hemisphereLight args={["#ffffff", "#444444", 3]} />
             {settings.useAmbientLight ? <ambientLight intensity={settings.ambientIntensity} /> : null}
             {settings.useDirectionalLight ? (
               <directionalLight
