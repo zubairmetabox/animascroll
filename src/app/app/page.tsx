@@ -302,6 +302,28 @@ export default function ProjectsPage() {
             ))}
           </div>
         )}
+        {/* Model sources */}
+        <div className="mt-12 border-t border-zinc-800/60 pt-6">
+          <p className="mb-3 text-xs text-zinc-500">Find free 3D models</p>
+          <div className="flex flex-wrap gap-2">
+            {([
+              ["Sketchfab", "https://sketchfab.com/3d-models"],
+              ["NASA 3D Resources", "https://science.nasa.gov/3d-resources/"],
+              ["Thingiverse", "https://www.thingiverse.com/"],
+              ["Printables", "https://www.printables.com/"],
+            ] as [string, string][]).map(([label, href]) => (
+              <a
+                key={href}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
+              >
+                {label}
+              </a>
+            ))}
+          </div>
+        </div>
       </main>
       )}
 
