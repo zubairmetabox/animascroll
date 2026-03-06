@@ -39,6 +39,7 @@ import {
   Maximize2,
   Move,
   Sparkles,
+  Link2,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
@@ -60,6 +61,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import SkillsManager from "@/components/skills-manager";
+import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animation-html";
 
 type ViewerSettings = {
   backgroundColor: string;
@@ -95,15 +97,6 @@ type ConfigPayload = {
   animationTracks?: AnimationTrack[];
 };
 
-type ExportConfig = {
-  backgroundColor: string;
-  useAmbientLight: boolean;
-  ambientIntensity: number;
-  pointLights: { color: string; intensity: number; x: number; y: number; z: number }[];
-  pinnedCamera: { position: [number, number, number]; target: [number, number, number]; fov: number; zoom: number } | null;
-  timelineLengthVh: number;
-  tracks: { layerName: string; propertyId: string; keyframes: { atVh: number; value: number; easing: string }[] }[];
-};
 
 type LayerItem = {
   id: string;
@@ -255,214 +248,6 @@ function applyEasing(t: number, easing: EasingType = "linear"): number {
   }
 }
 
-function generateAnimationHtml(glbDataUrl: string, cfg: ExportConfig): string {
-  const cfgJson = JSON.stringify(cfg);
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Animation</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-html { overflow-x: hidden; }
-body { background: ${cfg.backgroundColor}; }
-#canvas-wrap { position: fixed; inset: 0; }
-canvas { display: block; width: 100% !important; height: 100% !important; }
-</style>
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/"
-  }
-}
-</script>
-</head>
-<body>
-<div id="canvas-wrap"><canvas id="c"></canvas></div>
-<script type="module">
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-
-const CFG = ${cfgJson};
-const GLB_DATA_URL = '${glbDataUrl}';
-
-function applyEasing(t, easing) {
-  switch (easing) {
-    case 'easeIn':         return t * t;
-    case 'easeOut':        return t * (2 - t);
-    case 'easeInOut':      return t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
-    case 'easeInOutCubic': return t < 0.5 ? 4*t*t*t : (t-1)*(2*t-2)*(2*t-2)+1;
-    default:               return t;
-  }
-}
-
-function evaluateTrack(track, atVh) {
-  const kfs = track.keyframes;
-  if (!kfs.length) return 0;
-  if (kfs.length === 1 || atVh <= kfs[0].atVh) return kfs[0].value;
-  if (atVh >= kfs[kfs.length - 1].atVh) return kfs[kfs.length - 1].value;
-  for (let i = 0; i < kfs.length - 1; i++) {
-    if (kfs[i].atVh <= atVh && kfs[i + 1].atVh >= atVh) {
-      const raw = (atVh - kfs[i].atVh) / Math.max(1e-9, kfs[i + 1].atVh - kfs[i].atVh);
-      const t = applyEasing(raw, kfs[i].easing || 'linear');
-      return kfs[i].value + t * (kfs[i + 1].value - kfs[i].value);
-    }
-  }
-  return kfs[kfs.length - 1].value;
-}
-
-const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setClearColor(CFG.backgroundColor);
-renderer.shadowMap.enabled = true;
-
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(CFG.backgroundColor);
-
-const camera = new THREE.PerspectiveCamera(
-  CFG.pinnedCamera ? CFG.pinnedCamera.fov : 45,
-  window.innerWidth / window.innerHeight, 0.001, 100000
-);
-if (CFG.pinnedCamera) {
-  const p = CFG.pinnedCamera.position;
-  const t = CFG.pinnedCamera.target;
-  camera.position.set(p[0], p[1], p[2]);
-  camera.lookAt(new THREE.Vector3(t[0], t[1], t[2]));
-  camera.zoom = CFG.pinnedCamera.zoom != null ? CFG.pinnedCamera.zoom : 1;
-  camera.updateProjectionMatrix();
-}
-
-if (CFG.useAmbientLight) {
-  scene.add(new THREE.AmbientLight(0xffffff, CFG.ambientIntensity));
-}
-CFG.pointLights.forEach(function(l) {
-  const light = new THREE.PointLight(l.color, l.intensity, 100);
-  light.position.set(l.x, l.y, l.z);
-  scene.add(light);
-});
-
-function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
-}
-onResize();
-window.addEventListener('resize', onResize);
-
-document.body.style.height = (CFG.timelineLengthVh + 100) + 'vh';
-let currentVh = 0;
-function onScroll() {
-  const maxScroll = (CFG.timelineLengthVh / 100) * window.innerHeight;
-  currentVh = Math.min(Math.max(
-    (window.scrollY / Math.max(1, maxScroll)) * CFG.timelineLengthVh, 0
-  ), CFG.timelineLengthVh);
-}
-window.addEventListener('scroll', onScroll, { passive: true });
-window.addEventListener('resize', onScroll);
-
-const objMap = {};
-
-// Per-object rotation pivot: bounding-box centre + base state, captured once on
-// first rotation call so the object spins around its visual centre (not its
-// potentially offset local origin) without accumulating position drift.
-const pivotMap = {};
-function getOrCapturePivot(obj) {
-  if (pivotMap[obj.name]) return pivotMap[obj.name];
-  const bbox = new THREE.Box3().setFromObject(obj);
-  if (bbox.isEmpty()) return null;
-  const centerWorld = new THREE.Vector3();
-  bbox.getCenter(centerWorld);
-  const centerLocal = obj.parent
-    ? obj.parent.worldToLocal(centerWorld.clone())
-    : centerWorld.clone();
-  pivotMap[obj.name] = {
-    centerLocal,
-    basePos: obj.position.clone(),
-    baseQuat: obj.quaternion.clone(),
-  };
-  return pivotMap[obj.name];
-}
-
-function applyValue(obj, propertyId, value) {
-  switch (propertyId) {
-    case 'position.x': obj.position.x = value; break;
-    case 'position.y': obj.position.y = value; break;
-    case 'position.z': obj.position.z = value; break;
-    case 'rotation.x':
-    case 'rotation.y':
-    case 'rotation.z': {
-      const axis = propertyId.split('.')[1];
-      const rad = THREE.MathUtils.degToRad(value);
-      const newRotX = axis === 'x' ? rad : obj.rotation.x;
-      const newRotY = axis === 'y' ? rad : obj.rotation.y;
-      const newRotZ = axis === 'z' ? rad : obj.rotation.z;
-      const pivot = getOrCapturePivot(obj);
-      if (pivot) {
-        const newQuat = new THREE.Quaternion().setFromEuler(
-          new THREE.Euler(newRotX, newRotY, newRotZ, obj.rotation.order)
-        );
-        const deltaQuat = newQuat.clone().multiply(pivot.baseQuat.clone().invert());
-        const V = new THREE.Vector3().subVectors(pivot.centerLocal, pivot.basePos);
-        obj.position.subVectors(pivot.centerLocal, V.clone().applyQuaternion(deltaQuat));
-      }
-      obj.rotation.set(newRotX, newRotY, newRotZ, obj.rotation.order);
-      break;
-    }
-    case 'scale.uniform': obj.scale.setScalar(value); break;
-    case 'opacity':
-      obj.traverse(function(child) {
-        if (child.isMesh && child.material) {
-          child.material.transparent = true;
-          child.material.opacity = Math.min(Math.max(value, 0), 1);
-          child.material.needsUpdate = true;
-        }
-      });
-      break;
-  }
-}
-
-function applyTracks() {
-  CFG.tracks.forEach(function(track) {
-    const obj = objMap[track.layerName];
-    if (!obj) return;
-    applyValue(obj, track.propertyId, evaluateTrack(track, currentVh));
-  });
-}
-
-const loader = new GLTFLoader();
-loader.load(GLB_DATA_URL, function(gltf) {
-  scene.add(gltf.scene);
-
-  // Centre at world origin — matches Drei's <Center> in the editor so
-  // the saved camera target [0,0,0] points at the model correctly.
-  var box = new THREE.Box3().setFromObject(gltf.scene);
-  if (!box.isEmpty()) {
-    var center = box.getCenter(new THREE.Vector3());
-    gltf.scene.position.sub(center);
-    gltf.scene.updateMatrixWorld(true);
-  }
-
-  gltf.scene.traverse(function(obj) {
-    if (obj.name) objMap[obj.name] = obj;
-  });
-  applyTracks();
-  requestAnimationFrame(render);
-}, undefined, function(err) {
-  console.error('GLB load error', err);
-});
-
-function render() {
-  applyTracks();
-  renderer.render(scene, camera);
-  requestAnimationFrame(render);
-}
-</script>
-</body>
-</html>`;
-}
 
 function disposeScene(scene: THREE.Object3D) {
   scene.traverse((child) => {
@@ -1071,6 +856,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [editingProjectName, setEditingProjectName] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const projectNameInputRef = useRef<HTMLInputElement>(null);
+  const [isProjectPublic, setIsProjectPublic] = useState(false);
+  const [shareMenuOpen, setShareMenuOpen] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
   const [configText, setConfigText] = useState("");
   const [configDirty, setConfigDirty] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
@@ -1338,11 +1126,11 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   }, [kfContextMenu]);
 
   useEffect(() => {
-    if (!fileMenuOpen && !editMenuOpen) return;
-    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); };
+    if (!fileMenuOpen && !editMenuOpen && !shareMenuOpen) return;
+    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); setShareMenuOpen(false); };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
-  }, [fileMenuOpen, editMenuOpen]);
+  }, [fileMenuOpen, editMenuOpen, shareMenuOpen]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -2882,9 +2670,10 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       try {
         const res = await fetch(`/api/projects/${initialProjectId}`);
         if (!res.ok) return;
-        const { project } = await res.json() as { project: { id: string; name: string; model_blob_url: string | null; model_filename: string | null; config: ConfigPayload } };
+        const { project } = await res.json() as { project: { id: string; name: string; is_public: boolean; model_blob_url: string | null; model_filename: string | null; config: ConfigPayload } };
         if (!project) return;
         setCurrentProjectName(project.name ?? null);
+        setIsProjectPublic(project.is_public ?? false);
         if (!project.model_blob_url) {
           setCurrentProjectId(initialProjectId);
           setIsProjectLoading(false);
@@ -4235,6 +4024,95 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               </div>
             )}
           </div>
+
+          {/* Share menu */}
+          {currentProjectId && (
+            <div className="relative">
+              <button
+                type="button"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
+                  shareMenuOpen && "bg-muted/80",
+                  isProjectPublic && "text-emerald-400"
+                )}
+                onPointerDown={(e) => { e.stopPropagation(); setShareMenuOpen((v) => !v); setFileMenuOpen(false); setEditMenuOpen(false); }}
+              >
+                <Link2 className="h-3.5 w-3.5" />
+                Share
+                {isProjectPublic && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />}
+              </button>
+
+              {shareMenuOpen && (
+                <div
+                  className="absolute left-0 top-full z-[200] mt-1 w-72 rounded-lg border border-border/60 bg-card p-3 shadow-xl"
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  {isProjectPublic ? (
+                    <>
+                      <p className="mb-2 text-xs text-zinc-400">Anyone with the link can view this animation.</p>
+                      <div className="mb-2.5 flex items-center gap-1.5">
+                        <input
+                          readOnly
+                          className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 outline-none"
+                          value={`${typeof window !== "undefined" ? window.location.origin : ""}/share/${currentProjectId}`}
+                          onFocus={(e) => e.target.select()}
+                        />
+                        <button
+                          type="button"
+                          className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-600 transition-colors"
+                          onClick={async () => {
+                            await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
+                            setShareCopied(true);
+                            setTimeout(() => setShareCopied(false), 2000);
+                          }}
+                        >
+                          {shareCopied ? "Copied!" : "Copy"}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                        onClick={async () => {
+                          await fetch(`/api/projects/${currentProjectId}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ isPublic: false }),
+                          });
+                          setIsProjectPublic(false);
+                          setShareMenuOpen(false);
+                        }}
+                      >
+                        Stop sharing
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mb-3 text-xs text-zinc-400">
+                        Get a public link anyone can view — no sign-in required.
+                      </p>
+                      <button
+                        type="button"
+                        className="w-full rounded bg-white px-3 py-1.5 text-sm font-medium text-black hover:bg-zinc-200 transition-colors"
+                        onClick={async () => {
+                          await fetch(`/api/projects/${currentProjectId}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ isPublic: true }),
+                          });
+                          setIsProjectPublic(true);
+                          await navigator.clipboard.writeText(`${window.location.origin}/share/${currentProjectId}`);
+                          setShareCopied(true);
+                          setTimeout(() => setShareCopied(false), 2000);
+                        }}
+                      >
+                        Enable sharing &amp; copy link
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {viewMode === "animate" && selectedLayerId ? (
             <>
