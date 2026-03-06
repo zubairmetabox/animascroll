@@ -2182,9 +2182,19 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             const userId = user?.id;
             if (!userId) throw new Error("Not authenticated");
             const pathname = `models/${userId}/${Date.now()}-${file.name}`;
+
+            // Browsers often leave file.type empty for STL/FBX/OBJ — force a known type
+            const extMime: Record<string, string> = {
+              glb: "model/gltf-binary", gltf: "model/gltf+json",
+              fbx: "application/x-fbx", obj: "text/plain",
+              stl: "application/octet-stream",
+            };
+            const uploadContentType = file.type || extMime[ext] || "application/octet-stream";
+
             const blob = await upload(pathname, file, {
               access: "public",
               handleUploadUrl: "/api/upload",
+              contentType: uploadContentType,
             });
             await fetch(`/api/projects/${currentProjectId}`, {
               method: "PATCH",
@@ -2192,11 +2202,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               body: JSON.stringify({ modelBlobUrl: blob.url, modelFilename: file.name }),
             });
           } catch (err) {
-            const msg = err instanceof Error ? err.message : "";
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error("[upload] model upload failed:", msg);
             if (msg.toLowerCase().includes("storage limit") || msg.toLowerCase().includes("maximum size")) {
               setLayerMessage("Storage limit reached — delete a project to free space.");
             } else {
-              setLayerMessage("Model upload failed. Your work is local-only until you retry.");
+              setLayerMessage(`Model upload failed: ${msg}`);
             }
           } finally {
             setIsModelUploading(false);
