@@ -9,3 +9,9 @@ tsconfig.tsbuildinfo
 .env.local
 .env*.local
 public/temp/
+
+# Internal planning docs
+plan.md
+Shipping-Plan.md
+AiVersion.md
+memory.md
