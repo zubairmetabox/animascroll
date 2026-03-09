@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { head } from "@vercel/blob";
 import type { SkillIndex } from "@/lib/skills";
+import { sql } from "@/lib/db";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -283,11 +284,47 @@ function repairTruncatedJson(s: string): { message: string; operations: Operatio
   return { message: message + " (response was truncated; some operations may be missing)", operations };
 }
 
+// ── Rate limiting ─────────────────────────────────────────────────────────
+
+const RATE_WINDOW_SEC = 60;
+const RATE_LIMIT = 20; // requests per user per minute
+
+async function ensureRateLimitsTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      key TEXT NOT NULL,
+      window_start BIGINT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (key, window_start)
+    )
+  `.catch(() => {});
+}
+
+let rateLimitsTableReady = false;
+
+async function checkRateLimit(userId: string): Promise<boolean> {
+  if (!rateLimitsTableReady) {
+    await ensureRateLimitsTable();
+    rateLimitsTableReady = true;
+  }
+  const window = Math.floor(Date.now() / 1000 / RATE_WINDOW_SEC);
+  const key = `animate:${userId}`;
+  const rows = await sql`
+    INSERT INTO rate_limits (key, window_start, count)
+    VALUES (${key}, ${window}, 1)
+    ON CONFLICT (key, window_start)
+    DO UPDATE SET count = rate_limits.count + 1
+    RETURNING count
+  `;
+  return (rows[0].count as number) <= RATE_LIMIT;
+}
+
 // ── Route handler ─────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
     const { userId } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const body = await req.json() as {
       messages: Message[];
@@ -296,6 +333,12 @@ export async function POST(req: NextRequest) {
     };
 
     const { messages, sceneContext, screenshot } = body;
+
+    // Validate screenshot must be a data URI (prevents SSRF via external URLs)
+    if (screenshot && !screenshot.startsWith("data:image/")) {
+      return NextResponse.json({ error: "Invalid screenshot format" }, { status: 400 });
+    }
+
     const useVision = Boolean(screenshot);
 
     const client = useVision
@@ -304,9 +347,15 @@ export async function POST(req: NextRequest) {
 
     const model = useVision ? "gpt-4o" : "llama-3.3-70b-versatile";
 
+    // Rate limit: 20 requests per user per minute
+    const allowed = await checkRateLimit(userId);
+    if (!allowed) {
+      return NextResponse.json({ error: "Too many requests — please wait a moment" }, { status: 429 });
+    }
+
     // Fetch matched skills (non-blocking — if it fails, proceed without)
     const userPrompt = messages.findLast((m) => m.role === "user")?.content ?? "";
-    const skillBodies = userId ? await fetchMatchedSkills(userId, userPrompt).catch(() => []) : [];
+    const skillBodies = await fetchMatchedSkills(userId, userPrompt).catch(() => []);
 
     const systemPrompt = buildSystemPrompt(sceneContext, skillBodies);
 

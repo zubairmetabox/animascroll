@@ -62,6 +62,10 @@ const DOWNLOAD_BTN = `
   Download HTML
 </a>`;
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 // ── Route handler ───────────────────────────────────────────────────────────
 
 type StoredConfig = {
@@ -133,7 +137,7 @@ export async function GET(
 
   const modelUrl = project.model_blob_url as string;
   const isDownload = new URL(req.url).searchParams.get("download") === "1";
-  const projectTitle = `<title>${String(project.name)} — Animascroll</title>`;
+  const projectTitle = `<title>${escapeHtml(String(project.name))} — Animascroll</title>`;
 
   if (isDownload) {
     // Resolve relative URLs to absolute so the server-side fetch works
