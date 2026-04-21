@@ -195,6 +195,15 @@ const TIMELINE_PROPERTIES = [
   { id: "opacity", label: "Opacity" },
 ] as const;
 
+// Sentinel layer ID for the camera pseudo-layer in the timeline.
+// Not a real Three.js UUID — used to route camera property tracks.
+const CAMERA_LAYER_ID = "__camera__";
+
+const CAMERA_TIMELINE_PROPERTIES = [
+  { id: "camera.fov",   label: "Camera Zoom" },
+  { id: "camera.dolly", label: "Camera Dolly" },
+] as const;
+
 const DEFAULT_SETTINGS: ViewerSettings = {
   backgroundColor: "#0b0f13",
   showGrid: true,
@@ -649,6 +658,72 @@ function ScrubbableNumberField({
   );
 }
 
+// Timeline property number input — uses local string state while focused so
+// partial inputs like "0." and "-" aren't eaten by React's controlled-value reset.
+function PropertyNumberInput({
+  value,
+  step,
+  onBeginEdit,
+  onApply,
+  onCommit,
+}: {
+  value: number;
+  step: string;
+  onBeginEdit: () => void;
+  onApply: (rawValue: string) => void;
+  onCommit: () => void;
+}) {
+  const [localStr, setLocalStr] = useState<string | null>(null);
+  const editing = localStr !== null;
+  return (
+    <Input
+      type="number"
+      step={step}
+      value={editing ? localStr : value}
+      onFocus={() => {
+        setLocalStr(String(value));
+        onBeginEdit();
+      }}
+      onChange={(e) => {
+        setLocalStr(e.target.value);
+        onApply(e.target.value);
+      }}
+      onBlur={() => {
+        setLocalStr(null);
+        onCommit();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") { setLocalStr(null); e.currentTarget.blur(); }
+      }}
+      className="h-6 w-24 shrink-0 text-[11px]"
+    />
+  );
+}
+
+function TimelineLengthInput({ value, onChange }: { value: number; onChange: (raw: string) => void }) {
+  const [localStr, setLocalStr] = useState<string | null>(null);
+  const editing = localStr !== null;
+  return (
+    <Input
+      id="timeline-length"
+      type="number"
+      min={50}
+      max={5000}
+      step={10}
+      value={editing ? localStr : value}
+      onFocus={() => setLocalStr(String(value))}
+      onChange={(e) => { setLocalStr(e.target.value); onChange(e.target.value); }}
+      onBlur={() => setLocalStr(null)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") { setLocalStr(null); e.currentTarget.blur(); }
+      }}
+      className="h-8 w-24 text-xs"
+    />
+  );
+}
+
 // "neutral" = local RoomEnvironment (no CDN); others fetch from Polyhaven CDN via drei
 const ENV_PRESETS = ["neutral", "studio", "city", "dawn", "forest", "lobby", "night", "park", "sunset", "warehouse"] as const;
 type EnvPreset = typeof ENV_PRESETS[number];
@@ -1079,6 +1154,21 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     baseQuat: THREE.Quaternion;
   }>>(new Map());
 
+  // Per-layer scale pivot: same pattern as rotation — captured once so scale always
+  // computes position correction from the fixed base, never from current state.
+  const scalePivotRef = useRef<Map<string, {
+    centerLocal: THREE.Vector3;
+    basePos: THREE.Vector3;
+    baseScale: number;
+  }>>(new Map());
+
+  // Camera dolly capture: direction vector + target snapshot taken on the first
+  // dolly keyframe evaluation. Keeps camera on a fixed axis as distance changes.
+  const dollyCaptureRef = useRef<{
+    direction: THREE.Vector3;
+    target: THREE.Vector3;
+  } | null>(null);
+
   const togglePlayRef = useRef<() => void>(() => {});
   togglePlayRef.current = () => {
     if (isPlaying) {
@@ -1187,6 +1277,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const getLayerName = (layerId: string) => {
+    if (layerId === CAMERA_LAYER_ID) return CAMERA_LAYER_ID;
     const fromList = layerItems.find((layer) => layer.id === layerId)?.name;
     if (fromList) return fromList;
     const object = layerObjectMapRef.current.get(layerId);
@@ -1549,9 +1640,38 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const getTimelineRows = () => {
     const visibleLayers = getVisibleLayerItems();
     const rows: Array<
-      | { key: string; kind: "layer"; layer: LayerItem }
+      | { key: string; kind: "layer"; layer: LayerItem; isCamera?: boolean }
       | { key: string; kind: "property"; layer: LayerItem; propertyId: string; label: string }
     > = [];
+
+    // Camera pseudo-layer — always at top, not tied to any Three.js object
+    const cameraLayerItem: LayerItem = {
+      id: CAMERA_LAYER_ID,
+      parentId: null,
+      name: "Camera",
+      type: "camera",
+      depth: 0,
+      hasChildren: false,
+      visible: true,
+      opacity: 1,
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      worldPosition: { x: 0, y: 0, z: 0 },
+    };
+    rows.push({ key: "layer-__camera__", kind: "layer", layer: cameraLayerItem, isCamera: true });
+    if (timelineExpandedLayerIds.has(CAMERA_LAYER_ID)) {
+      CAMERA_TIMELINE_PROPERTIES.forEach((property) => {
+        rows.push({
+          key: `prop-__camera__-${property.id}`,
+          kind: "property",
+          layer: cameraLayerItem,
+          propertyId: property.id,
+          label: property.label,
+        });
+      });
+    }
+
     visibleLayers.forEach((layer) => {
       rows.push({ key: `layer-${layer.id}`, kind: "layer", layer });
       if (timelineExpandedLayerIds.has(layer.id)) {
@@ -1759,6 +1879,16 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const getTimelinePropertyValue = (layer: LayerItem, propertyId: string) => {
+    if (layer.id === CAMERA_LAYER_ID) {
+      if (propertyId === "camera.fov") return cameraRef.current?.fov ?? DEFAULT_CAMERA_VIEW.fov;
+      if (propertyId === "camera.dolly") {
+        const cam = cameraRef.current;
+        const ctrl = orbitControlsRef.current;
+        if (cam && ctrl) return cam.position.distanceTo(ctrl.target);
+        return 5;
+      }
+      return 0;
+    }
     switch (propertyId) {
       case "position.x":
         return layer.position.x;
@@ -1785,10 +1915,41 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     if (propertyId.startsWith("rotation.")) return "1";
     if (propertyId === "opacity") return "0.01";
     if (propertyId.startsWith("position.")) return "0.001";
+    if (propertyId === "camera.fov") return "0.5";
+    if (propertyId === "camera.dolly") return "0.01";
     return "0.001";
   };
 
   const applyTimelinePropertyValue = (layer: LayerItem, propertyId: string, rawValue: string) => {
+    // Camera pseudo-layer — apply to the Three.js camera/controls directly
+    if (layer.id === CAMERA_LAYER_ID) {
+      const cam = cameraRef.current;
+      if (!cam) return;
+      if (propertyId === "camera.fov") {
+        const fov = THREE.MathUtils.clamp(Number(rawValue), 10, 120);
+        if (!Number.isNaN(fov)) { cam.fov = fov; cam.updateProjectionMatrix(); }
+        return;
+      }
+      if (propertyId === "camera.dolly") {
+        const dist = Number(rawValue);
+        if (Number.isNaN(dist) || dist <= 0) return;
+        const ctrl = orbitControlsRef.current;
+        if (!dollyCaptureRef.current && ctrl) {
+          dollyCaptureRef.current = {
+            direction: cam.position.clone().sub(ctrl.target).normalize(),
+            target: ctrl.target.clone(),
+          };
+        }
+        if (dollyCaptureRef.current) {
+          const { direction, target } = dollyCaptureRef.current;
+          cam.position.copy(target).addScaledVector(direction, dist);
+          orbitControlsRef.current?.update();
+        }
+        return;
+      }
+      return;
+    }
+
     switch (propertyId) {
       case "position.x":
         updateLayerCoordinate(layer.id, "x", rawValue);
@@ -1847,9 +2008,39 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         syncLayerTransform(layer.id);
         return;
       }
-      case "scale.uniform":
-        updateLayerUniformScale(layer.id, rawValue);
+      case "scale.uniform": {
+        const scaleObj = layerObjectMapRef.current.get(layer.id);
+        if (!scaleObj) return;
+        const scaleVal = THREE.MathUtils.clamp(Number(rawValue), 0.001, 100);
+        if (Number.isNaN(scaleVal)) return;
+        // Same drift-free pivot pattern as rotation: capture bounding-box centre
+        // and base state once, then always compute position correction from that
+        // fixed base rather than from current (potentially accumulated) state.
+        if (!scalePivotRef.current.has(layer.id)) {
+          const bbox = new THREE.Box3().setFromObject(scaleObj);
+          if (!bbox.isEmpty()) {
+            const centerWorld = new THREE.Vector3();
+            bbox.getCenter(centerWorld);
+            const centerLocal = scaleObj.parent
+              ? scaleObj.parent.worldToLocal(centerWorld.clone())
+              : centerWorld.clone();
+            scalePivotRef.current.set(layer.id, {
+              centerLocal,
+              basePos: scaleObj.position.clone(),
+              baseScale: scaleObj.scale.x,
+            });
+          }
+        }
+        const scalePivot = scalePivotRef.current.get(layer.id);
+        scaleObj.scale.setScalar(scaleVal);
+        if (scalePivot && Math.abs(scalePivot.baseScale) > 1e-9) {
+          const ratio = scaleVal / scalePivot.baseScale;
+          const V = new THREE.Vector3().subVectors(scalePivot.centerLocal, scalePivot.basePos);
+          scaleObj.position.subVectors(scalePivot.centerLocal, V.multiplyScalar(ratio));
+        }
+        syncLayerTransform(layer.id);
         return;
+      }
       case "opacity":
         updateLayerOpacity(layer.id, rawValue);
         return;
@@ -1859,12 +2050,22 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const beginTimelinePropertyEdit = (layer: LayerItem, propertyId: string) => {
+    if (layer.id === CAMERA_LAYER_ID) return;
     if (propertyId.startsWith("position.")) beginLayerTransform(layer.id);
     else if (propertyId.startsWith("rotation.")) beginLayerRotation(layer.id);
     else if (propertyId === "scale.uniform") beginLayerScale(layer.id);
   };
 
   const commitTimelinePropertyEdit = (layer: LayerItem, propertyId: string) => {
+    if (layer.id === CAMERA_LAYER_ID) {
+      // Camera properties are applied live; just save keyframe if one exists here
+      const atVh = Number(timelineCurrentVh.toFixed(2));
+      const track = getTrack(layer.id, propertyId);
+      if (track?.keyframes.some((kf) => Number(kf.atVh.toFixed(2)) === atVh)) {
+        upsertKeyframeAtCurrentTime(layer, propertyId);
+      }
+      return;
+    }
     if (propertyId.startsWith("position.")) commitLayerTransform(layer.id);
     else if (propertyId.startsWith("rotation.")) commitLayerRotation(layer.id);
     else if (propertyId === "scale.uniform") commitLayerScale(layer.id);
@@ -1901,6 +2102,29 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   useEffect(() => {
     if (animationTracks.length === 0) return;
     for (const track of animationTracks) {
+      if (track.layerId === CAMERA_LAYER_ID) {
+        // Camera tracks don't map to a LayerItem — apply directly to the camera
+        const value = evaluateTrackAtVh(track, timelineCurrentVh);
+        const cam = cameraRef.current;
+        if (!cam) continue;
+        if (track.propertyId === "camera.fov") {
+          cam.fov = THREE.MathUtils.clamp(value, 10, 120);
+          cam.updateProjectionMatrix();
+        } else if (track.propertyId === "camera.dolly") {
+          if (!dollyCaptureRef.current && orbitControlsRef.current) {
+            dollyCaptureRef.current = {
+              direction: cam.position.clone().sub(orbitControlsRef.current.target).normalize(),
+              target: orbitControlsRef.current.target.clone(),
+            };
+          }
+          if (dollyCaptureRef.current && value > 0) {
+            const { direction, target } = dollyCaptureRef.current;
+            cam.position.copy(target).addScaledVector(direction, value);
+            orbitControlsRef.current?.update();
+          }
+        }
+        continue;
+      }
       const layer = layerItemsRef.current.find((l) => l.id === track.layerId);
       if (!layer) continue;
       const value = evaluateTrackAtVh(track, timelineCurrentVh);
@@ -2048,6 +2272,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const selectLayer = (layerId: string) => {
+    if (layerId === CAMERA_LAYER_ID) return;
     if (!layerObjectMapRef.current.get(layerId)) {
       setSelectedLayerId(null);
       return;
@@ -2194,6 +2419,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       setModelScene(loadedScene);
       posthog.capture("model_uploaded");
       rotationPivotRef.current.clear();
+      scalePivotRef.current.clear();
+      dollyCaptureRef.current = null;
       const { items, objectMap } = getLayerItems(loadedScene);
       setLayerItems(items);
       layerObjectMapRef.current = objectMap;
@@ -2214,6 +2441,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         if (cfg.pointLights?.length) setPointLights(cfg.pointLights);
         if (Array.isArray(cfg.animationTracks)) {
           const remapped = cfg.animationTracks.map((track) => {
+            if (track.layerId === CAMERA_LAYER_ID) return track;
             if (items.some((l) => l.id === track.layerId)) return track;
             if (track.layerName) {
               const match = items.find((l) => l.name === track.layerName);
@@ -2426,6 +2654,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       if (Array.isArray(parsed.animationTracks)) {
         const currentLayers = layerItemsRef.current;
         const remapped = (parsed.animationTracks as AnimationTrack[]).map((track) => {
+          if (track.layerId === CAMERA_LAYER_ID) return track;
           // If the UUID still exists in the scene, use as-is
           if (currentLayers.some((l) => l.id === track.layerId)) return track;
           // Otherwise try to match by saved layer name (handles re-upload with new UUIDs)
@@ -4982,15 +5211,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                   <Label htmlFor="timeline-length" className="text-xs text-muted-foreground">
                     Length (vh)
                   </Label>
-                  <Input
-                    id="timeline-length"
-                    type="number"
-                    min={50}
-                    max={5000}
-                    step={10}
+                  <TimelineLengthInput
                     value={timelineLengthVh}
-                    onChange={(event) => updateTimelineLengthVh(event.target.value)}
-                    className="h-8 w-24 text-xs"
+                    onChange={updateTimelineLengthVh}
                   />
                   <Button
                     size="sm"
@@ -5103,6 +5326,49 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                             style={selectedLayerId === row.layer.id ? { boxShadow: "inset 3px 0 0 hsl(var(--primary))" } : undefined}
                           >
                             {row.kind === "layer" ? (
+                              row.layer.id === CAMERA_LAYER_ID ? (
+                                // ── Camera pseudo-layer row ─────────────────────────────
+                                <div
+                                  data-layer-id={row.layer.id}
+                                  className="sticky left-0 z-20 flex h-8 items-center gap-1 border-r bg-card px-2 text-xs"
+                                  style={{ backgroundColor: "rgba(59, 130, 246, 0.08)" }}
+                                >
+                                  <Camera className="h-3.5 w-3.5 shrink-0 text-blue-400" />
+                                  <Button
+                                    data-no-drag="true"
+                                    type="button"
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 w-6 p-0"
+                                    onClick={() =>
+                                      setTimelineExpandedLayerIds((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(CAMERA_LAYER_ID)) next.delete(CAMERA_LAYER_ID);
+                                        else next.add(CAMERA_LAYER_ID);
+                                        return next;
+                                      })
+                                    }
+                                  >
+                                    {timelineExpandedLayerIds.has(CAMERA_LAYER_ID) ? (
+                                      <ChevronDown className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <ChevronRight className="h-3.5 w-3.5" />
+                                    )}
+                                  </Button>
+                                  {animationTracks.some(
+                                    (t) => t.layerId === CAMERA_LAYER_ID && t.keyframes.length > 0
+                                  ) ? (
+                                    <span
+                                      className="inline-block h-2 w-2 shrink-0 rotate-45 bg-amber-400/80"
+                                      title="Has keyframes"
+                                    />
+                                  ) : (
+                                    <span className="inline-block h-2 w-2 shrink-0" />
+                                  )}
+                                  <span className="min-w-0 flex-1 truncate text-blue-300/90">Camera</span>
+                                </div>
+                              ) : (
+                              // ── Normal mesh layer row ───────────────────────────────
                               <div
                                 data-layer-id={row.layer.id}
                                 className={cn(
@@ -5252,6 +5518,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                                   onCheckedChange={(checked) => setLayerVisibility(row.layer.id, checked)}
                                 />
                               </div>
+                            )
                             ) : (
                               <div
                                 className="sticky left-0 z-20 flex h-7 min-w-0 items-center gap-1 border-r bg-card px-2 text-[11px] text-muted-foreground"
@@ -5353,31 +5620,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                                     </>
                                   ) : null}
                                 </div>
-                                <Input
-                                  type="number"
-                                  step={getTimelinePropertyStep(row.propertyId)}
+                                <PropertyNumberInput
                                   value={getTimelinePropertyValue(row.layer, row.propertyId)}
-                                  onFocus={() => beginTimelinePropertyEdit(row.layer, row.propertyId)}
-                                  onBlur={() => {
-                                    modifierInputTypingRef.current = false;
-                                    commitTimelinePropertyEdit(row.layer, row.propertyId);
-                                  }}
-                                  onKeyDown={(event) => {
-                                    const isTypingKey =
-                                      /^[0-9.\-eE]$/.test(event.key) ||
-                                      event.key === "Backspace" ||
-                                      event.key === "Delete";
-                                    modifierInputTypingRef.current = isTypingKey;
-                                    if (event.key === "Enter") event.currentTarget.blur();
-                                  }}
-                                  onChange={(event) => {
-                                    applyTimelinePropertyValue(row.layer, row.propertyId, event.target.value);
-                                    if (!modifierInputTypingRef.current) {
-                                      upsertKeyframeAtCurrentTime(row.layer, row.propertyId, true);
-                                    }
-                                    modifierInputTypingRef.current = false;
-                                  }}
-                                  className="h-6 w-24 shrink-0 text-[11px]"
+                                  step={getTimelinePropertyStep(row.propertyId)}
+                                  onBeginEdit={() => beginTimelinePropertyEdit(row.layer, row.propertyId)}
+                                  onApply={(raw) => applyTimelinePropertyValue(row.layer, row.propertyId, raw)}
+                                  onCommit={() => commitTimelinePropertyEdit(row.layer, row.propertyId)}
                                 />
                               </div>
                             )}
