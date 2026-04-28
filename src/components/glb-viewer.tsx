@@ -1032,6 +1032,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   });
   const panelDragIdRef = useRef<SectionId | null>(null);
   const [dropIndicator, setDropIndicator] = useState<{ panel: "left" | "right"; idx: number } | null>(null);
+  const uiPrefsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uiPrefsLoadedRef = useRef(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
@@ -2129,6 +2131,58 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
   }, []);
+
+  // ── UI prefs: load once on mount ────────────────────────────────────────
+  useEffect(() => {
+    fetch("/api/settings/ui")
+      .then((r) => r.ok ? r.json() : null)
+      .then((prefs) => {
+        if (!prefs) return;
+        if (prefs.workspace) setWorkspace(prefs.workspace);
+        if (typeof prefs.leftPanelWidth === "number") setLeftPanelWidth(prefs.leftPanelWidth);
+        if (typeof prefs.rightPanelWidth === "number") setRightPanelWidth(prefs.rightPanelWidth);
+        if (prefs.panelLayout?.left && prefs.panelLayout?.right) setPanelLayout(prefs.panelLayout);
+        if (prefs.sectionsOpen) {
+          if (typeof prefs.sectionsOpen.environment === "boolean") setShowEnv(prefs.sectionsOpen.environment);
+          if (typeof prefs.sectionsOpen.navigation === "boolean") setShowNav(prefs.sectionsOpen.navigation);
+          if (typeof prefs.sectionsOpen.lighting === "boolean") setShowLighting(prefs.sectionsOpen.lighting);
+          if (typeof prefs.sectionsOpen.pointLights === "boolean") setShowPointLights(prefs.sectionsOpen.pointLights);
+          if (typeof prefs.sectionsOpen.variables === "boolean") setShowVariables(prefs.sectionsOpen.variables);
+          if (typeof prefs.sectionsOpen.aiAnimator === "boolean") setAiAnimatorOpen(prefs.sectionsOpen.aiAnimator);
+          if (typeof prefs.sectionsOpen.history === "boolean") setHistoryOpen(prefs.sectionsOpen.history);
+        }
+        uiPrefsLoadedRef.current = true;
+      })
+      .catch(() => { uiPrefsLoadedRef.current = true; });
+  }, []);
+
+  // ── UI prefs: debounced save on change (skip until loaded) ──────────────
+  useEffect(() => {
+    if (!uiPrefsLoadedRef.current) return;
+    if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current);
+    uiPrefsSaveTimerRef.current = setTimeout(() => {
+      fetch("/api/settings/ui", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace,
+          leftPanelWidth,
+          rightPanelWidth,
+          panelLayout,
+          sectionsOpen: {
+            environment: showEnv,
+            navigation: showNav,
+            lighting: showLighting,
+            pointLights: showPointLights,
+            variables: showVariables,
+            aiAnimator: aiAnimatorOpen,
+            history: historyOpen,
+          },
+        }),
+      }).catch(() => {});
+    }, 1000);
+    return () => { if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current); };
+  }, [workspace, leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showNav, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen]);
 
   useEffect(() => {
     if (animationTracks.length === 0) return;
