@@ -5452,7 +5452,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                   return (
                     <div
                       ref={setTimelineScrollEl}
-                      className="overflow-auto"
+                      className="overflow-auto timeline-scroll"
                       style={{ maxHeight: `${timelinePanelHeight}px` }}
                       onDragStart={(e) => e.preventDefault()}
                     >
