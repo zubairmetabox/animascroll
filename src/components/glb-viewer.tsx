@@ -64,6 +64,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import SkillsManager from "@/components/skills-manager";
+import { AiKeySettings } from "@/components/ai-key-settings";
 import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animation-html";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -1019,6 +1020,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [editMenuOpen, setEditMenuOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpMd, setHelpMd] = useState<string | null>(null);
   const [logEvents, setLogEvents] = useState<{ id: string; ts: Date; msg: string }[]>([]);
@@ -4400,6 +4402,14 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                 <button
                   type="button"
                   className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => { setFileMenuOpen(false); setAiSettingsOpen(true); }}
+                >
+                  <Sparkles className="mr-2 h-4 w-4 text-primary" />
+                  AI Settings…
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
                   onClick={() => { setFileMenuOpen(false); setSkillsOpen(true); }}
                 >
                   <Sparkles className="mr-2 h-4 w-4" />
@@ -6125,6 +6135,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           </div>
         </div>
       )}
+
+      {aiSettingsOpen && <AiKeySettings onClose={() => setAiSettingsOpen(false)} />}
 
       {skillsOpen && (
         <div

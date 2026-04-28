@@ -5,6 +5,21 @@ import { head } from "@vercel/blob";
 import type { SkillIndex } from "@/lib/skills";
 import { sql } from "@/lib/db";
 
+// ── User AI settings ───────────────────────────────────────────────────────
+
+async function getUserAiSettings(userId: string): Promise<{ key: string | null; model: string }> {
+  try {
+    const rows = await sql`SELECT openrouter_key, model_id FROM user_ai_settings WHERE user_id = ${userId}`;
+    if (rows.length === 0) return { key: null, model: "anthropic/claude-sonnet-4-5" };
+    return {
+      key: (rows[0].openrouter_key as string | null) || null,
+      model: (rows[0].model_id as string) || "anthropic/claude-sonnet-4-5",
+    };
+  } catch {
+    return { key: null, model: "anthropic/claude-sonnet-4-5" };
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 type Keyframe = { atVh: number; value: number; easing?: string };
@@ -341,11 +356,20 @@ export async function POST(req: NextRequest) {
 
     const useVision = Boolean(screenshot);
 
-    const client = useVision
-      ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-      : new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: "https://api.groq.com/openai/v1" });
+    const { key: userKey, model } = await getUserAiSettings(userId);
 
-    const model = useVision ? "gpt-4o" : "llama-3.3-70b-versatile";
+    if (!userKey) {
+      return NextResponse.json(
+        { error: "No API key configured. Add your OpenRouter key in File → AI Settings." },
+        { status: 402 }
+      );
+    }
+
+    const client = new OpenAI({
+      apiKey: userKey,
+      baseURL: "https://openrouter.ai/api/v1",
+      defaultHeaders: { "HTTP-Referer": "https://animascroll.com", "X-Title": "Animascroll" },
+    });
 
     // Rate limit: 20 requests per user per minute
     const allowed = await checkRateLimit(userId);

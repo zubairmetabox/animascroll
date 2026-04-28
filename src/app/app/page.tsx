@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import SkillsManager from "@/components/skills-manager";
+import { AiKeySettingsContent } from "@/components/ai-key-settings";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -32,7 +33,7 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-type Tab = "projects" | "skills";
+type Tab = "projects" | "skills" | "ai-settings";
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -157,12 +158,39 @@ export default function ProjectsPage() {
           <Sparkles className="h-3.5 w-3.5" />
           Animation Skills
         </button>
+        <button
+          onClick={() => setTab("ai-settings")}
+          className={cn(
+            "flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors",
+            tab === "ai-settings"
+              ? "border-white text-white"
+              : "border-transparent text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <Sparkles className="h-3.5 w-3.5 text-primary" />
+          AI Settings
+        </button>
       </div>
 
       {/* Skills tab */}
       {tab === "skills" && (
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
           <SkillsManager mode="page" />
+        </div>
+      )}
+
+      {/* AI Settings tab */}
+      {tab === "ai-settings" && (
+        <div className="flex-1 overflow-y-auto">
+          <div className="mx-auto max-w-md px-8 py-10">
+            <div className="mb-6">
+              <h1 className="text-2xl font-semibold text-white">AI Settings</h1>
+              <p className="mt-1 text-sm text-zinc-400">
+                Connect your <span className="text-zinc-200 font-medium">OpenRouter</span> account to use any AI model for animation.
+              </p>
+            </div>
+            <AiKeySettingsContent />
+          </div>
         </div>
       )}
 
