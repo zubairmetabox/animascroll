@@ -43,6 +43,8 @@ import {
   Sparkles,
   Link2,
   HelpCircle,
+  LayoutPanelLeft,
+  GripVertical,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
@@ -169,6 +171,7 @@ type AnimationTrack = {
 };
 
 type ViewMode = "animate" | "preview";
+type SectionId = "history" | "environment" | "navigation" | "lighting" | "pointLights" | "variables" | "aiAnimator";
 
 type CameraView = {
   position: [number, number, number];
@@ -1003,6 +1006,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [isModelUploading, setIsModelUploading] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("animate");
+  const [workspace, setWorkspace] = useState<"full" | "framed">("framed");
+  const [leftPanelWidth, setLeftPanelWidth] = useState(280);
+  const [rightPanelWidth, setRightPanelWidth] = useState(280);
   const [pinnedCameraView, setPinnedCameraView] = useState<CameraView | null>(null);
   const [timelineLengthVh, setTimelineLengthVh] = useState(200);
   const [timelineCurrentVh, setTimelineCurrentVh] = useState(0);
@@ -1014,7 +1020,18 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
   const [selectedKfIds, setSelectedKfIds] = useState<Set<string>>(new Set());
   const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number; top: number; bottom: number; startX: number; endX: number } | null>(null);
-  const [showCustomize, setShowCustomize] = useState(false);
+  const [showEnv, setShowEnv] = useState(true);
+  const [showNav, setShowNav] = useState(false);
+  const [showLighting, setShowLighting] = useState(true);
+  const [showPointLights, setShowPointLights] = useState(false);
+  const [showVariables, setShowVariables] = useState(false);
+  const [aiAnimatorOpen, setAiAnimatorOpen] = useState(false);
+  const [panelLayout, setPanelLayout] = useState<{ left: SectionId[]; right: SectionId[] }>({
+    left: ["history"],
+    right: ["environment", "navigation", "lighting", "pointLights", "variables", "aiAnimator"],
+  });
+  const panelDragIdRef = useRef<SectionId | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{ panel: "left" | "right"; idx: number } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
@@ -1099,6 +1116,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const reorderLayerRef = useRef<(draggedId: string, targetId: string, insertBefore: boolean) => void>(() => {});
   // pinnedCameraView is kept in state (see useState above) so the config effect re-runs on changes
   const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const leftPanelResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const rightPanelResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const timelineSeekDragRef = useRef(false);
   const timelineRulerRef = useRef<HTMLDivElement | null>(null);
   const [timelineScrollEl, setTimelineScrollEl] = useState<HTMLDivElement | null>(null);
@@ -1389,6 +1408,14 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         const next = THREE.MathUtils.clamp(Math.round(drag.startHeight + delta), 28, 560);
         setTimelinePanelHeight(next);
       }
+      if (leftPanelResizeDragRef.current) {
+        const { startX, startWidth } = leftPanelResizeDragRef.current;
+        setLeftPanelWidth(THREE.MathUtils.clamp(startWidth + (event.clientX - startX), 160, 520));
+      }
+      if (rightPanelResizeDragRef.current) {
+        const { startX, startWidth } = rightPanelResizeDragRef.current;
+        setRightPanelWidth(THREE.MathUtils.clamp(startWidth - (event.clientX - startX), 160, 520));
+      }
 
       const modifierDrag = timelineModifierDragRef.current;
       if (modifierDrag) {
@@ -1520,6 +1547,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     };
     const onPointerUp = () => {
       timelineResizeRef.current = null;
+      leftPanelResizeDragRef.current = null;
+      rightPanelResizeDragRef.current = null;
       timelineSeekDragRef.current = false;
 
       // Commit retime drag
@@ -4096,6 +4125,235 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     </div>
   );
 
+  const isFramed = workspace === "framed" && hasModel && viewMode !== "preview";
+  const FRAMED_TOP = 36;
+  const HANDLE_W = 4;
+
+  // ── Panel drag-and-drop helpers ──────────────────────────────────────────
+  const handlePanelDrop = (targetPanel: "left" | "right", insertIdx: number) => {
+    const dragId = panelDragIdRef.current;
+    if (!dragId) return;
+    setPanelLayout((prev) => {
+      const next = { left: [...prev.left], right: [...prev.right] };
+      const fromPanel: "left" | "right" = next.left.includes(dragId) ? "left" : "right";
+      next[fromPanel] = next[fromPanel].filter((id) => id !== dragId);
+      let idx = insertIdx;
+      if (fromPanel === targetPanel) {
+        const origIdx = prev[targetPanel].indexOf(dragId);
+        if (origIdx < insertIdx) idx--;
+      }
+      next[targetPanel].splice(Math.max(0, idx), 0, dragId);
+      return next;
+    });
+    setDropIndicator(null);
+    panelDragIdRef.current = null;
+  };
+
+  const sectionOpenState: Record<SectionId, [boolean, (v: boolean) => void]> = {
+    history: [historyOpen, setHistoryOpen],
+    environment: [showEnv, setShowEnv],
+    navigation: [showNav, setShowNav],
+    lighting: [showLighting, setShowLighting],
+    pointLights: [showPointLights, setShowPointLights],
+    variables: [showVariables, setShowVariables],
+    aiAnimator: [aiAnimatorOpen, setAiAnimatorOpen],
+  };
+
+  const sectionMeta: Record<SectionId, { label: string; icon: React.ReactNode }> = {
+    history:      { label: "History",                 icon: <History    className="h-4 w-4 text-muted-foreground" /> },
+    environment:  { label: "Environment",             icon: <Globe2     className="h-4 w-4 text-muted-foreground" /> },
+    navigation:   { label: "Navigation",              icon: <Camera     className="h-4 w-4 text-muted-foreground" /> },
+    lighting:     { label: "Lighting",                icon: <Lightbulb  className="h-4 w-4 text-muted-foreground" /> },
+    pointLights:  { label: "Additional Light Sources",icon: <Plus       className="h-4 w-4 text-muted-foreground" /> },
+    variables:    { label: "Variables",               icon: <Code2      className="h-4 w-4 text-muted-foreground" /> },
+    aiAnimator:   { label: "AI Animator",             icon: <Sparkles   className="h-4 w-4 text-muted-foreground" /> },
+  };
+
+  const renderSectionBody = (id: SectionId): React.ReactNode => {
+    switch (id) {
+      case "history":
+        return historyOpen ? <div className="px-3 pb-3 pt-1">{historyPanel}</div> : null;
+      case "environment":
+        return showEnv ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <ColorField label="Background color" value={settings.backgroundColor} onChange={(v) => patchSettings({ backgroundColor: v })} />
+            <ToggleField label="Show grid" checked={settings.showGrid} onChange={(v) => patchSettings({ showGrid: v })} />
+          </div>
+        ) : null;
+      case "navigation":
+        return showNav ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <ToggleField label="Enable zoom" checked={settings.orbitEnableZoom} onChange={(v) => patchSettings({ orbitEnableZoom: v })} />
+            <ToggleField label="Auto rotate" checked={settings.orbitAutoRotate} onChange={(v) => patchSettings({ orbitAutoRotate: v })} />
+          </div>
+        ) : null;
+      case "lighting":
+        return showLighting ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <ToggleField label="Environment map" checked={settings.useEnvironmentMap} onChange={(v) => patchSettings({ useEnvironmentMap: v })} />
+            {settings.useEnvironmentMap && (
+              <>
+                <div className="flex items-center justify-between">
+                  <Label>Preset</Label>
+                  <select value={settings.environmentPreset} onChange={(e) => patchSettings({ environmentPreset: e.target.value })} className="rounded border border-input bg-background px-2 py-1 text-xs">
+                    {ENV_PRESETS.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+                <SliderField label="Env intensity" value={settings.environmentIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ environmentIntensity: v })} />
+              </>
+            )}
+            <SliderField label="Exposure" value={settings.toneMappingExposure} min={0.1} max={5} step={0.05} onChange={(v) => patchSettings({ toneMappingExposure: v })} />
+            <ToggleField label="Ambient enabled" checked={settings.useAmbientLight} onChange={(v) => patchSettings({ useAmbientLight: v })} />
+            <SliderField label="Ambient intensity" value={settings.ambientIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ ambientIntensity: v })} />
+            <ToggleField label="Directional enabled" checked={settings.useDirectionalLight} onChange={(v) => patchSettings({ useDirectionalLight: v })} />
+            <SliderField label="Directional intensity" value={settings.directionalIntensity} min={0} max={5} step={0.05} onChange={(v) => patchSettings({ directionalIntensity: v })} />
+            <SliderField label="Directional X" value={settings.directionalX} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalX: v })} />
+            <SliderField label="Directional Y" value={settings.directionalY} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalY: v })} />
+            <SliderField label="Directional Z" value={settings.directionalZ} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalZ: v })} />
+          </div>
+        ) : null;
+      case "pointLights":
+        return showPointLights ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <Button size="sm" variant="secondary" className="w-full" onClick={addPointLight} disabled={pointLights.length >= MAX_POINT_LIGHTS}>
+              <Plus className="mr-2 h-4 w-4" />Add light
+            </Button>
+            {pointLights.map((light, index) => (
+              <div key={light.id} className="rounded-md border border-border/60 p-2 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium">Point Light {index + 1}</span>
+                  <div className="flex items-center gap-2">
+                    <Switch checked={light.enabled} onCheckedChange={(v) => updatePointLight(light.id, { enabled: v })} />
+                    <Button size="sm" variant="secondary" onClick={() => removePointLight(light.id)} disabled={pointLights.length === 1}><Trash2 className="h-4 w-4" /></Button>
+                  </div>
+                </div>
+                <ColorField label="Color" value={light.color} onChange={(v) => updatePointLight(light.id, { color: v })} />
+                <SliderField label="Intensity" value={light.intensity} min={0} max={20} step={0.05} onChange={(v) => updatePointLight(light.id, { intensity: v })} />
+                <SliderField label="Distance" value={light.distance} min={0} max={500} step={1} onChange={(v) => updatePointLight(light.id, { distance: v })} />
+                <p className="text-xs text-muted-foreground">Distance 0 = no cutoff.</p>
+                <SliderField label="Decay" value={light.decay} min={0} max={4} step={0.1} onChange={(v) => updatePointLight(light.id, { decay: v })} />
+                <SliderField label="X" value={light.x} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { x: v })} />
+                <SliderField label="Y" value={light.y} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { y: v })} />
+                <SliderField label="Z" value={light.z} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { z: v })} />
+              </div>
+            ))}
+          </div>
+        ) : null;
+      case "variables":
+        return showVariables ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <div className="rounded-md border bg-slate-50 p-2 shadow-inner dark:bg-zinc-950">
+              <div className="mb-2 flex justify-end">
+                <Button size="sm" variant="outline" onClick={formatConfig}><Code2 className="mr-2 h-4 w-4" />Format JSON</Button>
+              </div>
+              <Textarea value={configText} onChange={(e) => { setConfigText(e.target.value); setConfigDirty(true); setHasUnsavedChanges(true); scheduleAutosave(); setConfigMessage(null); }} rows={16} className="font-mono shadow-inner" />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={copyConfig}><Clipboard className="mr-2 h-4 w-4" />Copy</Button>
+              <Button size="sm" variant="outline" onClick={saveConfigLocal}><Save className="mr-2 h-4 w-4" />Save Local</Button>
+              <Button size="sm" variant="outline" onClick={loadConfigLocal}><Download className="mr-2 h-4 w-4" />Load Local</Button>
+              <Button size="sm" onClick={applyConfigFromText}><Check className="mr-2 h-4 w-4" />Apply</Button>
+            </div>
+            {configMessage ? (
+              <p className={cn("inline-flex items-center gap-1.5 text-xs", configStatusTone === "error" ? "text-red-500" : "text-muted-foreground")}>
+                <Circle className={cn("h-2.5 w-2.5", configStatusTone === "success" ? "fill-green-500 text-green-500" : "fill-red-500 text-red-500")} />
+                {configMessage}
+              </p>
+            ) : null}
+          </div>
+        ) : null;
+      case "aiAnimator":
+        return aiAnimatorOpen ? (
+          <div className="flex flex-col gap-2 px-3 pb-3 pt-1">
+            <AiChatPanel
+              layerItems={layerItems}
+              animationTracks={animationTracks}
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              setAnimationTracks={setTracksWithHistory as unknown as (t: any[]) => void}
+              timelineLengthVh={timelineLengthVh}
+              setTimelineLengthVh={(vh) => { setTimelineLengthVh(vh); setHasUnsavedChanges(true); scheduleAutosave(); }}
+              settings={settings}
+              patchSettings={patchSettings}
+              pointLights={pointLights}
+              setPointLights={(lights) => { setPointLights(lights); setHasUnsavedChanges(true); scheduleAutosave(); }}
+              projectId={currentProjectId}
+              addLog={addLog}
+              onOperationsApplied={fitModelToCamera}
+              onExplodedView={(centroid, maxOffset) => {
+                const camera = cameraRef.current;
+                const controls = orbitControlsRef.current;
+                if (!camera || !controls) return;
+                const fovRad = THREE.MathUtils.degToRad(camera.fov);
+                const distance = (maxOffset / Math.tan(fovRad / 2)) * 2.0;
+                const direction = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+                camera.position.set(centroid.x, centroid.y, centroid.z).addScaledVector(direction, distance);
+                controls.target.set(centroid.x, centroid.y, centroid.z);
+                controls.update();
+                setPinnedCameraView({
+                  position: [camera.position.x, camera.position.y, camera.position.z],
+                  target: [controls.target.x, controls.target.y, controls.target.z],
+                  fov: camera.fov,
+                  zoom: camera.zoom,
+                });
+                setHasUnsavedChanges(true); scheduleAutosave();
+              }}
+            />
+          </div>
+        ) : null;
+      default:
+        return null;
+    }
+  };
+
+  const renderPanel = (side: "left" | "right"): React.ReactNode => {
+    const ids = panelLayout[side];
+    return (
+      <div className={isFramed ? "" : "overflow-hidden rounded-xl border border-border bg-card/95 backdrop-blur-sm w-[280px]"}>
+        {ids.map((id, idx) => {
+          const meta = sectionMeta[id];
+          const [open, setOpen] = sectionOpenState[id];
+          const isDragging = panelDragIdRef.current === id;
+          const showIndicatorAbove = dropIndicator?.panel === side && dropIndicator.idx === idx;
+          return (
+            <div
+              key={id}
+              draggable
+              onDragStart={(e) => { e.stopPropagation(); panelDragIdRef.current = id; e.dataTransfer.effectAllowed = "move"; }}
+              onDragEnd={() => { panelDragIdRef.current = null; setDropIndicator(null); }}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDropIndicator({ panel: side, idx }); }}
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handlePanelDrop(side, idx); }}
+              className={cn("border-b border-border/50 group/section", isDragging && "opacity-30")}
+            >
+              {showIndicatorAbove && <div className="h-0.5 bg-primary" />}
+              <button
+                type="button"
+                className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors"
+                onClick={() => setOpen(!open)}
+              >
+                <span className="flex items-center gap-2">{meta.icon}{meta.label}</span>
+                <span className="flex items-center gap-1">
+                  <GripVertical className="h-3.5 w-3.5 text-muted-foreground/0 group-hover/section:text-muted-foreground/50 transition-colors cursor-grab" onPointerDown={(e) => e.stopPropagation()} />
+                  {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+                </span>
+              </button>
+              {renderSectionBody(id)}
+            </div>
+          );
+        })}
+        {/* Drop zone at the end of the panel */}
+        <div
+          className="min-h-4 flex-1"
+          onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDropIndicator({ panel: side, idx: ids.length }); }}
+          onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handlePanelDrop(side, ids.length); }}
+        >
+          {dropIndicator?.panel === side && dropIndicator.idx === ids.length && (
+            <div className="h-0.5 bg-primary mx-0" />
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div
       ref={viewerRef}
@@ -4110,7 +4368,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       onDragLeave={() => setIsDragging(false)}
       onDrop={onDrop}
     >
-      <div className="absolute inset-0">
+      <div
+        className="absolute"
+        style={isFramed
+          ? { top: FRAMED_TOP, left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W, bottom: timelinePanelHeight }
+          : { inset: 0 }}
+      >
         {hasModel ? (
           <>
           <Canvas gl={{ preserveDrawingBuffer: true }} onPointerMissed={viewMode === "animate" ? handleCanvasPointerMissed : undefined}>
@@ -4284,7 +4547,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       {/* ── Floating menu buttons — only after a model is loaded, not in preview ─── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className="absolute left-4 top-3 z-[60] flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          className={cn(
+            "absolute left-4 z-[60] flex items-center gap-0.5 px-1",
+            isFramed
+              ? "top-0 h-9 py-0"
+              : "top-3 rounded-lg border border-border/40 bg-card/90 py-0.5 backdrop-blur-sm"
+          )}
           onPointerDown={(e) => e.stopPropagation()}
         >
           <button
@@ -4578,25 +4846,65 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div>
       ) : null}
 
+      {/* ── Framed View chrome: top bar bg + panel resize handles ──── */}
+      {isFramed && (
+        <>
+          <div className="pointer-events-none absolute left-0 right-0 top-0 z-[59] border-b border-border bg-[#0d1117]" style={{ height: FRAMED_TOP }} />
+          <div
+            className="absolute z-[55] transition-colors hover:bg-primary/30 active:bg-primary/60"
+            style={{ top: FRAMED_TOP, left: leftPanelWidth, width: HANDLE_W, bottom: 0, cursor: "ew-resize" }}
+            onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); leftPanelResizeDragRef.current = { startX: e.clientX, startWidth: leftPanelWidth }; }}
+          />
+          <div
+            className="absolute z-[55] transition-colors hover:bg-primary/30 active:bg-primary/60"
+            style={{ top: FRAMED_TOP, right: rightPanelWidth, width: HANDLE_W, bottom: 0, cursor: "ew-resize" }}
+            onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); rightPanelResizeDragRef.current = { startX: e.clientX, startWidth: rightPanelWidth }; }}
+          />
+        </>
+      )}
+
+      {/* ── Workspace selector — centred in top bar ──────────────────────── */}
+      {hasModel && viewMode !== "preview" ? (
+        <div
+          className="absolute left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2"
+          style={{ top: 0, height: FRAMED_TOP }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <span className="text-xs text-muted-foreground">Workspace :</span>
+          <div className={cn(
+            "flex items-center gap-0.5 rounded-md p-0.5",
+            isFramed ? "bg-muted/40" : "border border-border/40 bg-card/90 backdrop-blur-sm"
+          )}>
+            <Button
+              size="sm"
+              variant={workspace === "framed" ? "secondary" : "ghost"}
+              className="h-6 px-2.5 text-xs"
+              onClick={() => setWorkspace("framed")}
+            >
+              <LayoutPanelLeft className="mr-1 h-3 w-3" />Framed
+            </Button>
+            <Button
+              size="sm"
+              variant={workspace === "full" ? "secondary" : "ghost"}
+              className="h-6 px-2.5 text-xs"
+              onClick={() => setWorkspace("full")}
+            >
+              <Maximize2 className="mr-1 h-3 w-3" />Full
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {hasModel && viewMode === "animate" ? (
-        <aside className="absolute left-4 top-16 z-50 w-fit space-y-2">
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full min-w-[160px] justify-between"
-                onClick={() => setHistoryOpen((prev) => !prev)}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <History className="h-4 w-4" />
-                  History
-                </span>
-                {historyOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {historyOpen ? <CardContent className="pt-0">{historyPanel}</CardContent> : null}
-          </Card>
+        <aside
+          className={cn("z-50", isFramed
+            ? "absolute overflow-y-auto border-r border-border bg-[#0d1117]"
+            : "absolute left-4 top-16 w-fit space-y-2")}
+          style={isFramed ? { top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: 0, overflowX: "hidden" } : undefined}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("left", panelLayout.left.length); }}
+        >
+          {renderPanel("left")}
         </aside>
       ) : null}
 
@@ -4613,7 +4921,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       {/* ── Navigate / Animate / Preview mode toggle — top-right ─────────── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className="absolute right-4 top-3 z-[60] flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          className={cn(
+            "absolute right-4 z-[60] flex items-center gap-1 px-1",
+            isFramed
+              ? "top-0 h-9 py-0"
+              : "top-3 rounded-lg border border-border/40 bg-card/90 py-0.5 backdrop-blur-sm"
+          )}
           onPointerDown={(e) => e.stopPropagation()}
         >
           {viewMode === "animate" && modelScene ? (
@@ -4799,318 +5112,144 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       ) : null}
 
       {hasModel && viewMode !== "preview" ? (
-        <aside className="absolute right-4 top-16 z-50 w-fit space-y-2">
+        <aside
+          className={cn("z-50", isFramed
+            ? "absolute overflow-y-auto border-l border-border bg-[#0d1117]"
+            : "absolute right-4 top-16 w-fit space-y-2")}
+          style={isFramed ? { top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: 0, overflowX: "hidden" } : undefined}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("right", panelLayout.right.length); }}
+        >
 
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full min-w-[160px] justify-between"
-                onClick={() => setShowCustomize((prev) => !prev)}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Settings2 className="h-4 w-4" />
-                  Customize
-                </span>
-                {showCustomize ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {showCustomize ? (
-              <CardContent className="max-h-[calc(100vh-7rem)] space-y-6 overflow-y-auto pt-0">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Globe2 className="h-5 w-5" />
-                  Environment
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <ColorField
-                  label="Background color"
-                  value={settings.backgroundColor}
-                  onChange={(value) => patchSettings({ backgroundColor: value })}
-                />
-                <ToggleField
-                  label="Show grid"
-                  checked={settings.showGrid}
-                  onChange={(v) => patchSettings({ showGrid: v })}
-                />
-              </CardContent>
-            </Card>
+          {renderPanel("right")}
+          {false && <div className={isFramed ? "" : "overflow-hidden rounded-xl border border-border bg-card/95 backdrop-blur-sm w-[280px]"}>
+          {/* ── Environment ──────────────────────────────────────── */}
+          <div className="border-b border-border/50">
+            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowEnv((v) => !v)}>
+              <span className="flex items-center gap-2"><Globe2 className="h-4 w-4 text-muted-foreground" />Environment</span>
+              {showEnv ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            </button>
+            {showEnv && (
+              <div className="space-y-3 px-3 pb-3 pt-1">
+                <ColorField label="Background color" value={settings.backgroundColor} onChange={(value) => patchSettings({ backgroundColor: value })} />
+                <ToggleField label="Show grid" checked={settings.showGrid} onChange={(v) => patchSettings({ showGrid: v })} />
+              </div>
+            )}
+          </div>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Camera className="h-5 w-5" />
-                  Navigation
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <ToggleField
-                  label="Enable zoom"
-                  checked={settings.orbitEnableZoom}
-                  onChange={(v) => patchSettings({ orbitEnableZoom: v })}
-                />
-                <ToggleField
-                  label="Auto rotate"
-                  checked={settings.orbitAutoRotate}
-                  onChange={(v) => patchSettings({ orbitAutoRotate: v })}
-                />
-              </CardContent>
-            </Card>
+          {/* ── Navigation ───────────────────────────────────────── */}
+          <div className="border-b border-border/50">
+            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowNav((v) => !v)}>
+              <span className="flex items-center gap-2"><Camera className="h-4 w-4 text-muted-foreground" />Navigation</span>
+              {showNav ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            </button>
+            {showNav && (
+              <div className="space-y-3 px-3 pb-3 pt-1">
+                <ToggleField label="Enable zoom" checked={settings.orbitEnableZoom} onChange={(v) => patchSettings({ orbitEnableZoom: v })} />
+                <ToggleField label="Auto rotate" checked={settings.orbitAutoRotate} onChange={(v) => patchSettings({ orbitAutoRotate: v })} />
+              </div>
+            )}
+          </div>
 
-            <Card>
-              <CardHeader className="flex-row items-center justify-between space-y-0">
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Lightbulb className="h-5 w-5" />
-                  Lighting
-                </CardTitle>
-                <Button size="sm" variant="secondary" onClick={addPointLight} disabled={pointLights.length >= MAX_POINT_LIGHTS}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add light
-                </Button>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <ToggleField
-                  label="Environment map"
-                  checked={settings.useEnvironmentMap}
-                  onChange={(v) => patchSettings({ useEnvironmentMap: v })}
-                />
+          {/* ── Lighting ─────────────────────────────────────────── */}
+          <div className="border-b border-border/50">
+            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowLighting((v) => !v)}>
+              <span className="flex items-center gap-2"><Lightbulb className="h-4 w-4 text-muted-foreground" />Lighting</span>
+              {showLighting ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            </button>
+            {showLighting && (
+              <div className="space-y-3 px-3 pb-3 pt-1">
+                <ToggleField label="Environment map" checked={settings.useEnvironmentMap} onChange={(v) => patchSettings({ useEnvironmentMap: v })} />
                 {settings.useEnvironmentMap && (
                   <>
                     <div className="flex items-center justify-between">
                       <Label>Preset</Label>
-                      <select
-                        value={settings.environmentPreset}
-                        onChange={(e) => patchSettings({ environmentPreset: e.target.value })}
-                        className="rounded border border-input bg-background px-2 py-1 text-xs"
-                      >
-                        {ENV_PRESETS.map((p) => (
-                          <option key={p} value={p}>{p}</option>
-                        ))}
+                      <select value={settings.environmentPreset} onChange={(e) => patchSettings({ environmentPreset: e.target.value })} className="rounded border border-input bg-background px-2 py-1 text-xs">
+                        {ENV_PRESETS.map((p) => <option key={p} value={p}>{p}</option>)}
                       </select>
                     </div>
-                    <SliderField
-                      label="Env intensity"
-                      value={settings.environmentIntensity}
-                      min={0}
-                      max={3}
-                      step={0.05}
-                      onChange={(v) => patchSettings({ environmentIntensity: v })}
-                    />
+                    <SliderField label="Env intensity" value={settings.environmentIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ environmentIntensity: v })} />
                   </>
                 )}
-                <SliderField
-                  label="Exposure"
-                  value={settings.toneMappingExposure}
-                  min={0.1}
-                  max={5}
-                  step={0.05}
-                  onChange={(v) => patchSettings({ toneMappingExposure: v })}
-                />
-                <ToggleField
-                  label="Ambient enabled"
-                  checked={settings.useAmbientLight}
-                  onChange={(v) => patchSettings({ useAmbientLight: v })}
-                />
-                <SliderField
-                  label="Ambient intensity"
-                  value={settings.ambientIntensity}
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  onChange={(v) => patchSettings({ ambientIntensity: v })}
-                />
-                <ToggleField
-                  label="Directional enabled"
-                  checked={settings.useDirectionalLight}
-                  onChange={(v) => patchSettings({ useDirectionalLight: v })}
-                />
-                <SliderField
-                  label="Directional intensity"
-                  value={settings.directionalIntensity}
-                  min={0}
-                  max={5}
-                  step={0.05}
-                  onChange={(v) => patchSettings({ directionalIntensity: v })}
-                />
-                <SliderField
-                  label="Directional X"
-                  value={settings.directionalX}
-                  min={-30}
-                  max={30}
-                  step={0.5}
-                  onChange={(v) => patchSettings({ directionalX: v })}
-                />
-                <SliderField
-                  label="Directional Y"
-                  value={settings.directionalY}
-                  min={-30}
-                  max={30}
-                  step={0.5}
-                  onChange={(v) => patchSettings({ directionalY: v })}
-                />
-                <SliderField
-                  label="Directional Z"
-                  value={settings.directionalZ}
-                  min={-30}
-                  max={30}
-                  step={0.5}
-                  onChange={(v) => patchSettings({ directionalZ: v })}
-                />
+                <SliderField label="Exposure" value={settings.toneMappingExposure} min={0.1} max={5} step={0.05} onChange={(v) => patchSettings({ toneMappingExposure: v })} />
+                <ToggleField label="Ambient enabled" checked={settings.useAmbientLight} onChange={(v) => patchSettings({ useAmbientLight: v })} />
+                <SliderField label="Ambient intensity" value={settings.ambientIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ ambientIntensity: v })} />
+                <ToggleField label="Directional enabled" checked={settings.useDirectionalLight} onChange={(v) => patchSettings({ useDirectionalLight: v })} />
+                <SliderField label="Directional intensity" value={settings.directionalIntensity} min={0} max={5} step={0.05} onChange={(v) => patchSettings({ directionalIntensity: v })} />
+                <SliderField label="Directional X" value={settings.directionalX} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalX: v })} />
+                <SliderField label="Directional Y" value={settings.directionalY} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalY: v })} />
+                <SliderField label="Directional Z" value={settings.directionalZ} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalZ: v })} />
+              </div>
+            )}
+          </div>
 
+          {/* ── Additional Light Sources ──────────────────────────── */}
+          <div className="border-b border-border/50">
+            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowPointLights((v) => !v)}>
+              <span className="flex items-center gap-2"><Plus className="h-4 w-4 text-muted-foreground" />Additional Light Sources</span>
+              {showPointLights ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            </button>
+            {showPointLights && (
+              <div className="space-y-3 px-3 pb-3 pt-1">
+                <Button size="sm" variant="secondary" className="w-full" onClick={addPointLight} disabled={pointLights.length >= MAX_POINT_LIGHTS}>
+                  <Plus className="mr-2 h-4 w-4" />Add light
+                </Button>
                 {pointLights.map((light, index) => (
-                  <Card key={light.id} className="border-border/80">
-                    <CardHeader className="flex-row items-center justify-between space-y-0">
-                      <CardTitle>Point Light {index + 1}</CardTitle>
+                  <div key={light.id} className="rounded-md border border-border/60 p-2 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium">Point Light {index + 1}</span>
                       <div className="flex items-center gap-2">
-                        <Switch
-                          checked={light.enabled}
-                          onCheckedChange={(v) => updatePointLight(light.id, { enabled: v })}
-                        />
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => removePointLight(light.id)}
-                          disabled={pointLights.length === 1}
-                        >
+                        <Switch checked={light.enabled} onCheckedChange={(v) => updatePointLight(light.id, { enabled: v })} />
+                        <Button size="sm" variant="secondary" onClick={() => removePointLight(light.id)} disabled={pointLights.length === 1}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <ColorField
-                        label="Color"
-                        value={light.color}
-                        onChange={(value) => updatePointLight(light.id, { color: value })}
-                      />
-                      <SliderField
-                        label="Intensity"
-                        value={light.intensity}
-                        min={0}
-                        max={20}
-                        step={0.05}
-                        onChange={(v) => updatePointLight(light.id, { intensity: v })}
-                      />
-                      <SliderField
-                        label="Distance"
-                        value={light.distance}
-                        min={0}
-                        max={500}
-                        step={1}
-                        onChange={(v) => updatePointLight(light.id, { distance: v })}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Distance 0 means no cutoff (infinite).
-                      </p>
-                      <SliderField
-                        label="Decay"
-                        value={light.decay}
-                        min={0}
-                        max={4}
-                        step={0.1}
-                        onChange={(v) => updatePointLight(light.id, { decay: v })}
-                      />
-                      <SliderField
-                        label="X"
-                        value={light.x}
-                        min={-100}
-                        max={100}
-                        step={0.5}
-                        onChange={(v) => updatePointLight(light.id, { x: v })}
-                      />
-                      <SliderField
-                        label="Y"
-                        value={light.y}
-                        min={-100}
-                        max={100}
-                        step={0.5}
-                        onChange={(v) => updatePointLight(light.id, { y: v })}
-                      />
-                      <SliderField
-                        label="Z"
-                        value={light.z}
-                        min={-100}
-                        max={100}
-                        step={0.5}
-                        onChange={(v) => updatePointLight(light.id, { z: v })}
-                      />
-                    </CardContent>
-                  </Card>
+                    </div>
+                    <ColorField label="Color" value={light.color} onChange={(value) => updatePointLight(light.id, { color: value })} />
+                    <SliderField label="Intensity" value={light.intensity} min={0} max={20} step={0.05} onChange={(v) => updatePointLight(light.id, { intensity: v })} />
+                    <SliderField label="Distance" value={light.distance} min={0} max={500} step={1} onChange={(v) => updatePointLight(light.id, { distance: v })} />
+                    <p className="text-xs text-muted-foreground">Distance 0 = no cutoff.</p>
+                    <SliderField label="Decay" value={light.decay} min={0} max={4} step={0.1} onChange={(v) => updatePointLight(light.id, { decay: v })} />
+                    <SliderField label="X" value={light.x} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { x: v })} />
+                    <SliderField label="Y" value={light.y} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { y: v })} />
+                    <SliderField label="Z" value={light.z} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { z: v })} />
+                  </div>
                 ))}
-              </CardContent>
-            </Card>
+              </div>
+            )}
+          </div>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Code2 className="h-5 w-5" />
-                  Variables (Editable JSON)
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
+          {/* ── Variables ────────────────────────────────────────── */}
+          <div className="border-b border-border/50">
+            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowVariables((v) => !v)}>
+              <span className="flex items-center gap-2"><Code2 className="h-4 w-4 text-muted-foreground" />Variables</span>
+              {showVariables ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            </button>
+            {showVariables && (
+              <div className="space-y-3 px-3 pb-3 pt-1">
                 <div className="rounded-md border bg-slate-50 p-2 shadow-inner dark:bg-zinc-950">
                   <div className="mb-2 flex justify-end">
-                    <Button size="sm" variant="outline" onClick={formatConfig}>
-                      <Code2 className="mr-2 h-4 w-4" />
-                      Format JSON
-                    </Button>
+                    <Button size="sm" variant="outline" onClick={formatConfig}><Code2 className="mr-2 h-4 w-4" />Format JSON</Button>
                   </div>
-                  <Textarea
-                    value={configText}
-                    onChange={(e) => {
-                      setConfigText(e.target.value);
-                      setConfigDirty(true);
-                      setHasUnsavedChanges(true); scheduleAutosave();
-                      setConfigMessage(null);
-                    }}
-                    rows={16}
-                    className="font-mono shadow-inner"
-                  />
+                  <Textarea value={configText} onChange={(e) => { setConfigText(e.target.value); setConfigDirty(true); setHasUnsavedChanges(true); scheduleAutosave(); setConfigMessage(null); }} rows={16} className="font-mono shadow-inner" />
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" onClick={copyConfig}>
-                    <Clipboard className="mr-2 h-4 w-4" />
-                    Copy
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={saveConfigLocal}>
-                    <Save className="mr-2 h-4 w-4" />
-                    Save Local
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={loadConfigLocal}>
-                    <Download className="mr-2 h-4 w-4" />
-                    Load Local
-                  </Button>
-                  <Button size="sm" onClick={applyConfigFromText}>
-                    <Check className="mr-2 h-4 w-4" />
-                    Apply
-                  </Button>
+                  <Button size="sm" variant="outline" onClick={copyConfig}><Clipboard className="mr-2 h-4 w-4" />Copy</Button>
+                  <Button size="sm" variant="outline" onClick={saveConfigLocal}><Save className="mr-2 h-4 w-4" />Save Local</Button>
+                  <Button size="sm" variant="outline" onClick={loadConfigLocal}><Download className="mr-2 h-4 w-4" />Load Local</Button>
+                  <Button size="sm" onClick={applyConfigFromText}><Check className="mr-2 h-4 w-4" />Apply</Button>
                 </div>
-              </CardContent>
-              <CardFooter className="justify-end">
                 {configMessage ? (
-                  <p
-                    className={cn(
-                      "inline-flex items-center gap-1.5 text-xs text-muted-foreground",
-                      configStatusTone === "error" ? "text-red-500" : "text-muted-foreground"
-                    )}
-                  >
-                    <Circle
-                      className={cn(
-                        "h-2.5 w-2.5",
-                        configStatusTone === "success" ? "fill-green-500 text-green-500" : "fill-red-500 text-red-500"
-                      )}
-                    />
+                  <p className={cn("inline-flex items-center gap-1.5 text-xs", configStatusTone === "error" ? "text-red-500" : "text-muted-foreground")}>
+                    <Circle className={cn("h-2.5 w-2.5", configStatusTone === "success" ? "fill-green-500 text-green-500" : "fill-red-500 text-red-500")} />
                     {configMessage}
                   </p>
                 ) : null}
-              </CardFooter>
-            </Card>
-              </CardContent>
-            ) : null}
-          </Card>
+              </div>
+            )}
+          </div>
 
+          {/* ── AI Animator ──────────────────────────────────────── */}
           <AiChatPanel
             layerItems={layerItems}
             animationTracks={animationTracks}
@@ -5129,12 +5268,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               const camera = cameraRef.current;
               const controls = orbitControlsRef.current;
               if (!camera || !controls) return;
-              // Fit camera to the expected exploded radius (centroid + maxOffset in all directions)
               const fovRad = THREE.MathUtils.degToRad(camera.fov);
               const distance = (maxOffset / Math.tan(fovRad / 2)) * 2.0;
-              const direction = new THREE.Vector3()
-                .subVectors(camera.position, controls.target)
-                .normalize();
+              const direction = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
               camera.position.set(centroid.x, centroid.y, centroid.z).addScaledVector(direction, distance);
               controls.target.set(centroid.x, centroid.y, centroid.z);
               controls.update();
@@ -5147,12 +5283,18 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               setHasUnsavedChanges(true); scheduleAutosave();
             }}
           />
+          </div>}
         </aside>
       ) : null}
 
       {hasModel && viewMode === "animate" ? (
-        <aside className="pointer-events-none absolute bottom-0 left-0 right-0 z-40">
-          <Card className="pointer-events-auto border bg-card/95 backdrop-blur">
+        <aside
+          className="pointer-events-none absolute bottom-0 z-40"
+          style={isFramed
+            ? { left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W }
+            : { left: 0, right: 0 }}
+        >
+          <Card className={cn("pointer-events-auto border bg-card/95 backdrop-blur", isFramed && "rounded-none")}>
             <CardContent className="space-y-3 p-3">
               <div className="flex justify-center -mt-1 -mx-3 mb-1 pt-1">
                 <div

@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Camera, ChevronDown, ChevronRight, Info, Send, Sparkles, X } from "lucide-react";
+import { Camera, ChevronDown, ChevronRight, Info, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
@@ -326,7 +325,6 @@ export function AiChatPanel({
   onExplodedView,
   onOperationsApplied,
 }: Props) {
-  const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -493,24 +491,7 @@ export function AiChatPanel({
     });
 
   return (
-    <Card className="bg-card/95 backdrop-blur">
-      <CardHeader className="py-3">
-        <Button
-          type="button"
-          variant="secondary"
-          className="w-full min-w-[160px] justify-between"
-          onClick={() => setOpen((v) => !v)}
-        >
-          <span className="inline-flex items-center gap-2">
-            <Sparkles className="h-4 w-4" />
-            AI Animator
-          </span>
-          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </Button>
-      </CardHeader>
-
-      {open && (
-        <CardContent className="flex flex-col gap-2 pt-0" style={{ width: 280 }}>
+    <div className="flex flex-col gap-2 px-3 pb-3 pt-1">
 
           {/* Message list */}
           <div className="flex max-h-72 flex-col gap-2 overflow-y-auto pr-0.5">
@@ -623,8 +604,6 @@ export function AiChatPanel({
               Upload a model to start animating
             </p>
           )}
-        </CardContent>
-      )}
-    </Card>
+    </div>
   );
 }
