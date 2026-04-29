@@ -178,7 +178,7 @@ type SavedCameraState = {
 };
 
 const MAX_POINT_LIGHTS = 4;
-const CONFIG_STORAGE_KEY = "glb_tool_viewer_config_v1";
+const CONFIG_STORAGE_KEY = "animascroll_config_v1";
 const DEFAULT_CAMERA_VIEW: SavedCameraState = {
   position: [2, 2, 2],
   target: [0, 0, 0],
@@ -1016,7 +1016,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
   const [selectedKfIds, setSelectedKfIds] = useState<Set<string>>(new Set());
   const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number; top: number; bottom: number; startX: number; endX: number } | null>(null);
-  const [showEnv, setShowEnv] = useState(true);
+  const [showEnvironment, setShowEnv] = useState(true);
   const [showCameraControls, setShowCameraControls] = useState(false);
   const [showLighting, setShowLighting] = useState(true);
   const [showPointLights, setShowPointLights] = useState(false);
@@ -1088,7 +1088,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const [shareCopied, setShareCopied] = useState(false);
   const [shareLoading, setShareLoading] = useState(false);
   const [configText, setConfigText] = useState("");
-  const [configDirty, setConfigDirty] = useState(false);
+  const [hasConfigChanges, setConfigDirty] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(new Set());
@@ -1210,13 +1210,13 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const redoCount = Math.max(0, historyEntries.length - 1 - historyIndex);
 
   useEffect(() => {
-    if (configDirty) return;
+    if (hasConfigChanges) return;
     const payload: SceneConfigPayload = { settings, pointLights };
     if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
     if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
     if (animationTracks.length > 0) payload.animationTracks = animationTracks;
     setConfigText(JSON.stringify(payload, null, 2));
-  }, [settings, pointLights, pinnedCameraView, timelineLengthVh, animationTracks, configDirty]);
+  }, [settings, pointLights, pinnedCameraView, timelineLengthVh, animationTracks, hasConfigChanges]);
 
   useEffect(() => {
     deletedLayerIdsRef.current = deletedLayerIds;
@@ -2174,7 +2174,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
           rightPanelWidth,
           panelLayout,
           sectionsOpen: {
-            environment: showEnv,
+            environment: showEnvironment,
             cameraControls: showCameraControls,
             lighting: showLighting,
             pointLights: showPointLights,
@@ -2187,7 +2187,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
       }).catch(() => {});
     }, 1000);
     return () => { if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current); };
-  }, [leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showCameraControls, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
+  }, [leftPanelWidth, rightPanelWidth, panelLayout, showEnvironment, showCameraControls, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
 
   useEffect(() => {
     if (animationTracks.length === 0) return;
@@ -4210,7 +4210,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
 
   const sectionOpenState: Record<SectionId, [boolean, (v: boolean) => void]> = {
     history: [historyOpen, setHistoryOpen],
-    environment: [showEnv, setShowEnv],
+    environment: [showEnvironment, setShowEnv],
     cameraControls: [showCameraControls, setShowCameraControls],
     lighting: [showLighting, setShowLighting],
     pointLights: [showPointLights, setShowPointLights],
@@ -4233,7 +4233,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
       case "history":
         return historyOpen ? <div className="px-3 pb-3 pt-1">{historyPanel}</div> : null;
       case "environment":
-        return showEnv ? (
+        return showEnvironment ? (
           <div className="space-y-3 px-3 pb-3 pt-1">
             <ColorField label="Background color" value={settings.backgroundColor} onChange={(v) => patchSettings({ backgroundColor: v })} />
             <ToggleField label="Show grid" checked={settings.showGrid} onChange={(v) => patchSettings({ showGrid: v })} />
