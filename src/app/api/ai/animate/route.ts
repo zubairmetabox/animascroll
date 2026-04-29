@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import { head } from "@vercel/blob";
 import type { SkillIndex } from "@/lib/skills";
 import type { Keyframe, Operation, SceneSettings, PointLightConfig } from "@/lib/types";
+import { checkRateLimit } from "@/lib/rate-limiting";
 import { sql } from "@/lib/db";
 
 // ── User AI settings ───────────────────────────────────────────────────────
@@ -280,40 +281,7 @@ function repairTruncatedJson(s: string): { message: string; operations: Operatio
   return { message: message + " (response was truncated; some operations may be missing)", operations };
 }
 
-// ── Rate limiting ─────────────────────────────────────────────────────────
-
-const RATE_WINDOW_SEC = 60;
-const RATE_LIMIT = 20; // requests per user per minute
-
-async function ensureRateLimitsTable() {
-  await sql`
-    CREATE TABLE IF NOT EXISTS rate_limits (
-      key TEXT NOT NULL,
-      window_start BIGINT NOT NULL,
-      count INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (key, window_start)
-    )
-  `.catch(() => {});
-}
-
-let rateLimitsTableReady = false;
-
-async function checkRateLimit(userId: string): Promise<boolean> {
-  if (!rateLimitsTableReady) {
-    await ensureRateLimitsTable();
-    rateLimitsTableReady = true;
-  }
-  const window = Math.floor(Date.now() / 1000 / RATE_WINDOW_SEC);
-  const key = `animate:${userId}`;
-  const rows = await sql`
-    INSERT INTO rate_limits (key, window_start, count)
-    VALUES (${key}, ${window}, 1)
-    ON CONFLICT (key, window_start)
-    DO UPDATE SET count = rate_limits.count + 1
-    RETURNING count
-  `;
-  return (rows[0].count as number) <= RATE_LIMIT;
-}
+// Rate limiting via @/lib/rate-limiting
 
 // ── Route handler ─────────────────────────────────────────────────────────
 
@@ -353,7 +321,7 @@ export async function POST(req: NextRequest) {
     });
 
     // Rate limit: 20 requests per user per minute
-    const allowed = await checkRateLimit(userId);
+    const allowed = await checkRateLimit(`ai-animate:${userId}`);
     if (!allowed) {
       return NextResponse.json({ error: "Too many requests — please wait a moment" }, { status: 429 });
     }
