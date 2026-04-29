@@ -122,7 +122,7 @@ export async function GET(
     pointLights: (config.pointLights ?? [])
       .filter((l) => l.enabled)
       .map(({ color, intensity, x, y, z }) => ({ color, intensity, x, y, z })),
-    pinnedCamera: config.pinnedCameraView ?? null,
+    pinnedCameraView: config.pinnedCameraView ?? null,
     timelineLengthVh: config.timelineLengthVh ?? 200,
     tracks: (config.animationTracks ?? []).map((t) => ({
       layerName: t.layerName ?? "",

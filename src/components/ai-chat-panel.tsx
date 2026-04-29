@@ -38,7 +38,7 @@ type LayerItem = {
   worldPosition: { x: number; y: number; z: number };
 };
 
-type ViewerSettings = {
+type SceneSettings = {
   backgroundColor: string;
   showGrid: boolean;
   useAmbientLight: boolean;
@@ -78,8 +78,8 @@ type Props = {
   setAnimationTracks: (tracks: AnimationTrack[]) => void;
   timelineLengthVh: number;
   setTimelineLengthVh: (vh: number) => void;
-  settings: ViewerSettings;
-  patchSettings: (patch: Partial<ViewerSettings>) => void;
+  settings: SceneSettings;
+  patchSettings: (patch: Partial<SceneSettings>) => void;
   pointLights: PointLightConfig[];
   setPointLights: (lights: PointLightConfig[]) => void;
   projectId: string | null;
@@ -97,7 +97,7 @@ function applyOperations(
   layerItems: LayerItem[],
   callbacks: {
     setTimelineLengthVh: (vh: number) => void;
-    patchSettings: (patch: Partial<ViewerSettings>) => void;
+    patchSettings: (patch: Partial<SceneSettings>) => void;
     setPointLights: (lights: PointLightConfig[]) => void;
     pointLights: PointLightConfig[];
     addLog?: (msg: string) => void;
@@ -118,7 +118,7 @@ function applyOperations(
     }
 
     if (op.type === "set_scene") {
-      callbacks.patchSettings(op.settings as Partial<ViewerSettings>);
+      callbacks.patchSettings(op.settings as Partial<SceneSettings>);
       log(`[AI] set_scene → ${JSON.stringify(op.settings)}`);
       continue;
     }

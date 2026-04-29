@@ -68,7 +68,7 @@ import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animati
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-type ViewerSettings = {
+type SceneSettings = {
   backgroundColor: string;
   showGrid: boolean;
   useAmbientLight: boolean;
@@ -106,10 +106,10 @@ type LayerTransform = {
   opacity: number;
 };
 
-type ConfigPayload = {
-  settings: ViewerSettings;
+type SceneConfigPayload = {
+  settings: SceneSettings;
   pointLights: PointLightConfig[];
-  pinnedCameraView?: CameraView;
+  pinnedCameraView?: SavedCameraState;
   timelineLengthVh?: number;
   animationTracks?: AnimationTrack[];
   layerTransforms?: LayerTransform[];
@@ -149,7 +149,7 @@ type HistoryEntry = {
   label: string;
   snapshot: LayerSnapshot;
   tracks: AnimationTrack[];
-  cameraView?: CameraView;
+  cameraView?: SavedCameraState;
 };
 
 type EasingType = "linear" | "easeIn" | "easeOut" | "easeInOut" | "easeInOutCubic";
@@ -170,7 +170,7 @@ type AnimationTrack = {
 type ViewMode = "animate" | "preview";
 type SectionId = "history" | "environment" | "navigation" | "lighting" | "pointLights" | "variables" | "aiAnimator";
 
-type CameraView = {
+type SavedCameraState = {
   position: [number, number, number];
   target: [number, number, number];
   fov: number;
@@ -179,7 +179,7 @@ type CameraView = {
 
 const MAX_POINT_LIGHTS = 4;
 const CONFIG_STORAGE_KEY = "glb_tool_viewer_config_v1";
-const DEFAULT_CAMERA_VIEW: CameraView = {
+const DEFAULT_CAMERA_VIEW: SavedCameraState = {
   position: [2, 2, 2],
   target: [0, 0, 0],
   fov: 45,
@@ -205,7 +205,7 @@ const CAMERA_TIMELINE_PROPERTIES = [
   { id: "camera.dolly", label: "Camera Dolly" },
 ] as const;
 
-const DEFAULT_SETTINGS: ViewerSettings = {
+const DEFAULT_SETTINGS: SceneSettings = {
   backgroundColor: "#0b0f13",
   showGrid: true,
   useAmbientLight: true,
@@ -729,7 +729,7 @@ function TimelineLengthInput({ value, onChange }: { value: number; onChange: (ra
 const ENV_PRESETS = ["neutral", "studio", "city", "dawn", "forest", "lobby", "night", "park", "sunset", "warehouse"] as const;
 type EnvPreset = typeof ENV_PRESETS[number];
 
-function clampSettings(raw: ViewerSettings): ViewerSettings {
+function clampSettings(raw: SceneSettings): SceneSettings {
   return {
     ...raw,
     ambientIntensity: THREE.MathUtils.clamp(raw.ambientIntensity, 0, 3),
@@ -1005,7 +1005,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const [viewMode, setViewMode] = useState<ViewMode>("animate");
   const [leftPanelWidth, setLeftPanelWidth] = useState(280);
   const [rightPanelWidth, setRightPanelWidth] = useState(280);
-  const [pinnedCameraView, setPinnedCameraView] = useState<CameraView | null>(null);
+  const [pinnedCameraView, setPinnedCameraView] = useState<SavedCameraState | null>(null);
   const [timelineLengthVh, setTimelineLengthVh] = useState(200);
   const [timelineCurrentVh, setTimelineCurrentVh] = useState(0);
   const [timelineProgress, setTimelineProgress] = useState(0);
@@ -1049,7 +1049,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
   const [uploadWarningOpen, setUploadWarningOpen] = useState(false);
   const [pendingSaveAction, setPendingSaveAction] = useState<(() => void) | null>(null);
-  const [settings, setSettings] = useState<ViewerSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<SceneSettings>(DEFAULT_SETTINGS);
   const [pointLights, setPointLights] = useState<PointLightConfig[]>([createDefaultPointLight(0)]);
   const [layerItems, setLayerItems] = useState<LayerItem[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
@@ -1211,7 +1211,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
 
   useEffect(() => {
     if (configDirty) return;
-    const payload: ConfigPayload = { settings, pointLights };
+    const payload: SceneConfigPayload = { settings, pointLights };
     if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
     if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
     if (animationTracks.length > 0) payload.animationTracks = animationTracks;
@@ -1639,7 +1639,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     };
   }, [layerItems, timelineLengthVh]);
 
-  const patchSettings = (patch: Partial<ViewerSettings>) => {
+  const patchSettings = (patch: Partial<SceneSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
     setHasUnsavedChanges(true); scheduleAutosave();
   };
@@ -2286,7 +2286,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     };
   };
 
-  const applyCameraView = (view: CameraView) => {
+  const applyCameraView = (view: SavedCameraState) => {
     const controls = orbitControlsRef.current;
     const camera = cameraRef.current;
     if (!controls || !camera) return;
@@ -2423,7 +2423,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     setSelectedLayerId(null);
   };
 
-  const loadFile = async (file: File, projectOpenOptions?: { projectId: string; config: ConfigPayload }) => {
+  const loadFile = async (file: File, projectOpenOptions?: { projectId: string; config: SceneConfigPayload }) => {
     const ext = file.name.toLowerCase().split(".").pop() ?? "";
     const supported = ["glb", "gltf", "fbx", "obj", "stl"];
 
@@ -2710,9 +2710,9 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     });
   };
 
-  const applyConfigPayload = (text: string): { ok: boolean; message: string } => {
+  const applySceneConfigPayload = (text: string): { ok: boolean; message: string } => {
     try {
-      const parsed = JSON.parse(text) as ConfigPayload;
+      const parsed = JSON.parse(text) as SceneConfigPayload;
       if (!parsed || typeof parsed !== "object") throw new Error("Invalid JSON root.");
       if (!parsed.settings || !parsed.pointLights) throw new Error("JSON requires settings and pointLights.");
 
@@ -2727,7 +2727,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
       // Animation data — backward compat: fields are optional
       if (parsed.pinnedCameraView && typeof parsed.pinnedCameraView === "object") {
         const cv = parsed.pinnedCameraView;
-        const view: CameraView = {
+        const view: SavedCameraState = {
           position: Array.isArray(cv.position) ? cv.position as [number, number, number] : DEFAULT_CAMERA_VIEW.position,
           target:   Array.isArray(cv.target)   ? cv.target   as [number, number, number] : DEFAULT_CAMERA_VIEW.target,
           fov:   typeof cv.fov  === "number" ? cv.fov  : DEFAULT_CAMERA_VIEW.fov,
@@ -2785,7 +2785,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   };
 
   const applyConfigFromText = () => {
-    const result = applyConfigPayload(configText);
+    const result = applySceneConfigPayload(configText);
     if (result.ok) setConfigDirty(false);
     setConfigMessage(result.message);
   };
@@ -2810,7 +2810,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     const thumbnailDataUrl = captureThumbnail();
     if (!thumbnailDataUrl) return;
     // Build config so pinnedCameraView (and any other unsaved changes) are persisted on close
-    const payload = buildConfigPayload();
+    const payload = buildSceneConfigPayload();
     try {
       await fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -2845,8 +2845,8 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     return result;
   };
 
-  const buildConfigPayload = (): ConfigPayload => {
-    const payload: ConfigPayload = { settings, pointLights };
+  const buildSceneConfigPayload = (): SceneConfigPayload => {
+    const payload: SceneConfigPayload = { settings, pointLights };
     if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
     if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
     if (animationTracks.length > 0) {
@@ -2863,7 +2863,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const saveToDb = async () => {
     if (!currentProjectId) return;
     setLayerMessage("Saving…");
-    const payload = buildConfigPayload();
+    const payload = buildSceneConfigPayload();
     const thumbnailDataUrl = captureThumbnail();
     await fetch(`/api/projects/${currentProjectId}`, {
       method: "PATCH",
@@ -2877,7 +2877,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   // Silent autosave — no thumbnail, no "Saving…" flash.
   const autoSaveConfigOnly = async () => {
     if (!currentProjectId || !hasUnsavedChangesRef.current || isModelUploadingRef.current) return;
-    const payload = buildConfigPayload();
+    const payload = buildSceneConfigPayload();
     try {
       await fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -2897,7 +2897,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   };
 
   const exportConfigToFile = () => {
-    const payload = buildConfigPayload();
+    const payload = buildSceneConfigPayload();
     const text = JSON.stringify(payload, null, 2);
     const blob = new Blob([text], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2956,7 +2956,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
           pointLights: pointLights
             .filter((l) => l.enabled)
             .map((l) => ({ color: l.color, intensity: l.intensity, x: l.x, y: l.y, z: l.z })),
-          pinnedCamera: pinnedCameraView
+          pinnedCameraView: pinnedCameraView
             ? { position: pinnedCameraView.position, target: pinnedCameraView.target, fov: pinnedCameraView.fov, zoom: pinnedCameraView.zoom }
             : null,
           timelineLengthVh,
@@ -2992,7 +2992,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     const reader = new FileReader();
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
-      const result = applyConfigPayload(text);
+      const result = applySceneConfigPayload(text);
       if (result.ok) {
         setConfigText(text);
         setConfigDirty(false);
@@ -3121,7 +3121,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     // Capture current camera so undo/redo restores the view
     const cam = cameraRef.current;
     const ctrl = orbitControlsRef.current;
-    const cameraView: CameraView | undefined = cam && ctrl ? {
+    const cameraView: SavedCameraState | undefined = cam && ctrl ? {
       position: [cam.position.x, cam.position.y, cam.position.z],
       target: [ctrl.target.x, ctrl.target.y, ctrl.target.z],
       fov: cam.fov,
@@ -3160,15 +3160,15 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
       ]);
       const blob = await modelRes.blob();
       const file = new File([blob], project.model_filename ?? "model.glb", { type: blob.type });
-      const { project: full } = await projRes.json() as { project: { config: ConfigPayload } };
-      await loadFile(file, { projectId: project.id, config: full.config ?? {} as ConfigPayload });
+      const { project: full } = await projRes.json() as { project: { config: SceneConfigPayload } };
+      await loadFile(file, { projectId: project.id, config: full.config ?? {} as SceneConfigPayload });
     } catch { /* show nothing — loadFile already handles errors */ }
   };
 
   // Auto-save project config (debounced 2s) whenever tracks or timeline length change
   useEffect(() => {
     if (!currentProjectId) return;
-    const payload = buildConfigPayload();
+    const payload = buildSceneConfigPayload();
     const timer = setTimeout(() => {
       void fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -3194,7 +3194,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
       try {
         const res = await fetch(`/api/projects/${initialProjectId}`);
         if (!res.ok) return;
-        const { project } = await res.json() as { project: { id: string; name: string; is_public: boolean; model_blob_url: string | null; model_filename: string | null; config: ConfigPayload } };
+        const { project } = await res.json() as { project: { id: string; name: string; is_public: boolean; model_blob_url: string | null; model_filename: string | null; config: SceneConfigPayload } };
         if (!project) return;
         setCurrentProjectName(project.name ?? null);
         setIsProjectPublic(project.is_public ?? false);

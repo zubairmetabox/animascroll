@@ -3,7 +3,7 @@ export type ExportConfig = {
   useAmbientLight: boolean;
   ambientIntensity: number;
   pointLights: { color: string; intensity: number; x: number; y: number; z: number }[];
-  pinnedCamera: { position: [number, number, number]; target: [number, number, number]; fov: number; zoom: number } | null;
+  pinnedCameraView: { position: [number, number, number]; target: [number, number, number]; fov: number; zoom: number } | null;
   timelineLengthVh: number;
   tracks: { layerName: string; propertyId: string; keyframes: { atVh: number; value: number; easing: string }[] }[];
 };
@@ -76,15 +76,15 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(CFG.backgroundColor);
 
 const camera = new THREE.PerspectiveCamera(
-  CFG.pinnedCamera ? CFG.pinnedCamera.fov : 45,
+  CFG.pinnedCameraView ? CFG.pinnedCameraView.fov : 45,
   window.innerWidth / window.innerHeight, 0.001, 100000
 );
-if (CFG.pinnedCamera) {
-  const p = CFG.pinnedCamera.position;
-  const t = CFG.pinnedCamera.target;
+if (CFG.pinnedCameraView) {
+  const p = CFG.pinnedCameraView.position;
+  const t = CFG.pinnedCameraView.target;
   camera.position.set(p[0], p[1], p[2]);
   camera.lookAt(new THREE.Vector3(t[0], t[1], t[2]));
-  camera.zoom = CFG.pinnedCamera.zoom != null ? CFG.pinnedCamera.zoom : 1;
+  camera.zoom = CFG.pinnedCameraView.zoom != null ? CFG.pinnedCameraView.zoom : 1;
   camera.updateProjectionMatrix();
 }
 
@@ -216,11 +216,11 @@ function applyTracks() {
         camera.fov = Math.min(Math.max(value, 10), 120);
         camera.updateProjectionMatrix();
       } else if (track.propertyId === 'camera.dolly') {
-        if (!dollyCapture && CFG.pinnedCamera) {
+        if (!dollyCapture && CFG.pinnedCameraView) {
           const tgt = new THREE.Vector3(
-            CFG.pinnedCamera.target[0],
-            CFG.pinnedCamera.target[1],
-            CFG.pinnedCamera.target[2]
+            CFG.pinnedCameraView.target[0],
+            CFG.pinnedCameraView.target[1],
+            CFG.pinnedCameraView.target[2]
           );
           dollyCapture = {
             direction: camera.position.clone().sub(tgt).normalize(),
