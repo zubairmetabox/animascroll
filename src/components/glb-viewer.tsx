@@ -1118,6 +1118,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const reorderLayerRef = useRef<(draggedId: string, targetId: string, insertBefore: boolean) => void>(() => {});
   // pinnedCameraView is kept in state (see useState above) so the config effect re-runs on changes
   const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const [timelineActualHeight, setTimelineActualHeight] = useState(330);
   const leftPanelResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const rightPanelResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const timelineSeekDragRef = useRef(false);
@@ -1401,6 +1402,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     }
     return () => { document.body.style.userSelect = ""; };
   }, [rubberBandVh]);
+
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
@@ -4425,7 +4427,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       <div
         className="absolute"
         style={isFramed
-          ? { top: FRAMED_TOP, left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W, bottom: timelinePanelHeight }
+          ? { top: FRAMED_TOP, left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W, bottom: timelineActualHeight }
           : { inset: 0 }}
       >
         {hasModel ? (
@@ -4906,12 +4908,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           <div className="pointer-events-none absolute left-0 right-0 top-0 z-[59] border-b border-border bg-[#0d1117]" style={{ height: FRAMED_TOP }} />
           <div
             className="absolute z-[55] transition-colors hover:bg-primary/30 active:bg-primary/60"
-            style={{ top: FRAMED_TOP, left: leftPanelWidth, width: HANDLE_W, bottom: 0, cursor: "ew-resize" }}
+            style={{ top: FRAMED_TOP, left: leftPanelWidth, width: HANDLE_W, bottom: timelineActualHeight, cursor: "ew-resize" }}
             onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); leftPanelResizeDragRef.current = { startX: e.clientX, startWidth: leftPanelWidth }; }}
           />
           <div
             className="absolute z-[55] transition-colors hover:bg-primary/30 active:bg-primary/60"
-            style={{ top: FRAMED_TOP, right: rightPanelWidth, width: HANDLE_W, bottom: 0, cursor: "ew-resize" }}
+            style={{ top: FRAMED_TOP, right: rightPanelWidth, width: HANDLE_W, bottom: timelineActualHeight, cursor: "ew-resize" }}
             onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); rightPanelResizeDragRef.current = { startX: e.clientX, startWidth: rightPanelWidth }; }}
           />
         </>
@@ -4954,7 +4956,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           className={cn("z-50", isFramed
             ? "absolute overflow-y-auto border-r border-border bg-[#0d1117]"
             : "absolute left-4 top-16 w-fit space-y-2")}
-          style={isFramed ? { top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: 0, overflowX: "hidden" } : undefined}
+          style={isFramed ? { top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" } : undefined}
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("left", panelLayout.left.length); }}
         >
@@ -5170,7 +5172,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           className={cn("z-50", isFramed
             ? "absolute overflow-y-auto border-l border-border bg-[#0d1117]"
             : "absolute right-4 top-16 w-fit space-y-2")}
-          style={isFramed ? { top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: 0, overflowX: "hidden" } : undefined}
+          style={isFramed ? { top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" } : undefined}
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("right", panelLayout.right.length); }}
         >
@@ -5343,26 +5345,25 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       {hasModel && viewMode === "animate" ? (
         <aside
+          ref={(el) => {
+            if (!el) return;
+            const ro = new ResizeObserver(([entry]) => setTimelineActualHeight(entry.contentRect.height));
+            ro.observe(el);
+          }}
           className="pointer-events-none absolute bottom-0 z-40"
-          style={isFramed
-            ? { left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W }
-            : { left: 0, right: 0 }}
+          style={{ left: 0, right: 0 }}
         >
+          {/* Top edge resize handle — matches sidebar handle style */}
+          <div
+            className="pointer-events-auto absolute left-0 right-0 top-0 z-10 h-1 cursor-ns-resize transition-colors hover:bg-primary/30 active:bg-primary/60"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              timelineResizeRef.current = { startY: e.clientY, startHeight: timelinePanelHeight };
+            }}
+          />
           <Card className={cn("pointer-events-auto border bg-card/95 backdrop-blur", isFramed && "rounded-none")}>
-            <CardContent className="space-y-3 p-3">
-              <div className="flex justify-center -mt-1 -mx-3 mb-1 pt-1">
-                <div
-                  className="h-1.5 w-20 cursor-ns-resize rounded-full bg-border hover:bg-border/60 active:bg-primary/60 transition-colors"
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    timelineResizeRef.current = {
-                      startY: event.clientY,
-                      startHeight: timelinePanelHeight,
-                    };
-                  }}
-                  title="Drag to resize timeline height"
-                />
-              </div>
+            <CardContent className="space-y-2 px-3 py-2">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <div className="text-xs font-medium">Timeline</div>
