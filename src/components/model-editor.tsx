@@ -991,7 +991,7 @@ function HelpContent({ md }: { md: string }) {
   );
 }
 
-export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
+export function ModelEditor({ initialProjectId }: { initialProjectId?: string }) {
   const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);

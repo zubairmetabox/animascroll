@@ -217,7 +217,7 @@ function applyOperations(
         }
       }
 
-      // Notify glb-viewer to auto-fit camera to exploded extents
+      // Notify model-editor to auto-fit camera to exploded extents
       callbacks.onExplodedView?.({ x: cx, y: cy, z: cz }, maxAbsPeak);
 
       log(`[AI] exploded_view → ${vh}vh ×${multiplier} | ${meshLayers.length} meshes | ${tracksCreated} tracks | centroid(${cx.toFixed(4)},${cy.toFixed(4)},${cz.toFixed(4)}) diagonal:${diagonal.toFixed(4)} minOffset:${minOffset.toFixed(4)}`);

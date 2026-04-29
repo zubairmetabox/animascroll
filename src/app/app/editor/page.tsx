@@ -2,14 +2,14 @@
 
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { GlbViewer } from "@/components/glb-viewer";
+import { ModelEditor } from "@/components/model-editor";
 
 function EditorInner() {
   const params = useSearchParams();
   const id = params.get("id") ?? undefined;
   return (
     <main className="h-screen w-screen overflow-hidden">
-      <GlbViewer initialProjectId={id} />
+      <ModelEditor initialProjectId={id} />
     </main>
   );
 }
