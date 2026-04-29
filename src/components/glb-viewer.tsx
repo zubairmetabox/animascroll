@@ -9,7 +9,6 @@ import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import {
-  Box,
   Camera,
   Check,
   Clock3,
@@ -31,7 +30,6 @@ import {
   RotateCcw,
   Redo2,
   Save,
-  Settings2,
   Trash2,
   Undo2,
   Upload,
@@ -5078,168 +5076,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           )}
 
           {renderPanel("right")}
-          {false && <div className={isFramed ? "" : "overflow-hidden rounded-xl border border-border bg-card/95 backdrop-blur-sm w-[280px]"}>
-          {/* ── Environment ──────────────────────────────────────── */}
-          <div className="border-b border-border/50">
-            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowEnv((v) => !v)}>
-              <span className="flex items-center gap-2"><Globe2 className="h-4 w-4 text-muted-foreground" />Environment</span>
-              {showEnv ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-            </button>
-            {showEnv && (
-              <div className="space-y-3 px-3 pb-3 pt-1">
-                <ColorField label="Background color" value={settings.backgroundColor} onChange={(value) => patchSettings({ backgroundColor: value })} />
-                <ToggleField label="Show grid" checked={settings.showGrid} onChange={(v) => patchSettings({ showGrid: v })} />
-              </div>
-            )}
-          </div>
-
-          {/* ── Navigation ───────────────────────────────────────── */}
-          <div className="border-b border-border/50">
-            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowNav((v) => !v)}>
-              <span className="flex items-center gap-2"><Camera className="h-4 w-4 text-muted-foreground" />Navigation</span>
-              {showNav ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-            </button>
-            {showNav && (
-              <div className="space-y-3 px-3 pb-3 pt-1">
-                <ToggleField label="Enable zoom" checked={settings.orbitEnableZoom} onChange={(v) => patchSettings({ orbitEnableZoom: v })} />
-                <ToggleField label="Auto rotate" checked={settings.orbitAutoRotate} onChange={(v) => patchSettings({ orbitAutoRotate: v })} />
-              </div>
-            )}
-          </div>
-
-          {/* ── Lighting ─────────────────────────────────────────── */}
-          <div className="border-b border-border/50">
-            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowLighting((v) => !v)}>
-              <span className="flex items-center gap-2"><Lightbulb className="h-4 w-4 text-muted-foreground" />Lighting</span>
-              {showLighting ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-            </button>
-            {showLighting && (
-              <div className="space-y-3 px-3 pb-3 pt-1">
-                <ToggleField label="Environment map" checked={settings.useEnvironmentMap} onChange={(v) => patchSettings({ useEnvironmentMap: v })} />
-                {settings.useEnvironmentMap && (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <Label>Preset</Label>
-                      <select value={settings.environmentPreset} onChange={(e) => patchSettings({ environmentPreset: e.target.value })} className="rounded border border-input bg-background px-2 py-1 text-xs">
-                        {ENV_PRESETS.map((p) => <option key={p} value={p}>{p}</option>)}
-                      </select>
-                    </div>
-                    <SliderField label="Env intensity" value={settings.environmentIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ environmentIntensity: v })} />
-                  </>
-                )}
-                <SliderField label="Exposure" value={settings.toneMappingExposure} min={0.1} max={5} step={0.05} onChange={(v) => patchSettings({ toneMappingExposure: v })} />
-                <ToggleField label="Ambient enabled" checked={settings.useAmbientLight} onChange={(v) => patchSettings({ useAmbientLight: v })} />
-                <SliderField label="Ambient intensity" value={settings.ambientIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ ambientIntensity: v })} />
-                <ToggleField label="Directional enabled" checked={settings.useDirectionalLight} onChange={(v) => patchSettings({ useDirectionalLight: v })} />
-                <SliderField label="Directional intensity" value={settings.directionalIntensity} min={0} max={5} step={0.05} onChange={(v) => patchSettings({ directionalIntensity: v })} />
-                <SliderField label="Directional X" value={settings.directionalX} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalX: v })} />
-                <SliderField label="Directional Y" value={settings.directionalY} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalY: v })} />
-                <SliderField label="Directional Z" value={settings.directionalZ} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalZ: v })} />
-              </div>
-            )}
-          </div>
-
-          {/* ── Additional Light Sources ──────────────────────────── */}
-          <div className="border-b border-border/50">
-            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowPointLights((v) => !v)}>
-              <span className="flex items-center gap-2"><Plus className="h-4 w-4 text-muted-foreground" />Additional Light Sources</span>
-              {showPointLights ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-            </button>
-            {showPointLights && (
-              <div className="space-y-3 px-3 pb-3 pt-1">
-                <Button size="sm" variant="secondary" className="w-full" onClick={addPointLight} disabled={pointLights.length >= MAX_POINT_LIGHTS}>
-                  <Plus className="mr-2 h-4 w-4" />Add light
-                </Button>
-                {pointLights.map((light, index) => (
-                  <div key={light.id} className="rounded-md border border-border/60 p-2 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium">Point Light {index + 1}</span>
-                      <div className="flex items-center gap-2">
-                        <Switch checked={light.enabled} onCheckedChange={(v) => updatePointLight(light.id, { enabled: v })} />
-                        <Button size="sm" variant="secondary" onClick={() => removePointLight(light.id)} disabled={pointLights.length === 1}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </div>
-                    <ColorField label="Color" value={light.color} onChange={(value) => updatePointLight(light.id, { color: value })} />
-                    <SliderField label="Intensity" value={light.intensity} min={0} max={20} step={0.05} onChange={(v) => updatePointLight(light.id, { intensity: v })} />
-                    <SliderField label="Distance" value={light.distance} min={0} max={500} step={1} onChange={(v) => updatePointLight(light.id, { distance: v })} />
-                    <p className="text-xs text-muted-foreground">Distance 0 = no cutoff.</p>
-                    <SliderField label="Decay" value={light.decay} min={0} max={4} step={0.1} onChange={(v) => updatePointLight(light.id, { decay: v })} />
-                    <SliderField label="X" value={light.x} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { x: v })} />
-                    <SliderField label="Y" value={light.y} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { y: v })} />
-                    <SliderField label="Z" value={light.z} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { z: v })} />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* ── Variables ────────────────────────────────────────── */}
-          <div className="border-b border-border/50">
-            <button type="button" className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors" onClick={() => setShowVariables((v) => !v)}>
-              <span className="flex items-center gap-2"><Code2 className="h-4 w-4 text-muted-foreground" />Variables</span>
-              {showVariables ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-            </button>
-            {showVariables && (
-              <div className="space-y-3 px-3 pb-3 pt-1">
-                <div className="rounded-md border bg-slate-50 p-2 shadow-inner dark:bg-zinc-950">
-                  <div className="mb-2 flex justify-end">
-                    <Button size="sm" variant="outline" onClick={formatConfig}><Code2 className="mr-2 h-4 w-4" />Format JSON</Button>
-                  </div>
-                  <Textarea value={configText} onChange={(e) => { setConfigText(e.target.value); setConfigDirty(true); setHasUnsavedChanges(true); scheduleAutosave(); setConfigMessage(null); }} rows={16} className="font-mono shadow-inner" />
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" onClick={copyConfig}><Clipboard className="mr-2 h-4 w-4" />Copy</Button>
-                  <Button size="sm" variant="outline" onClick={saveConfigLocal}><Save className="mr-2 h-4 w-4" />Save Local</Button>
-                  <Button size="sm" variant="outline" onClick={loadConfigLocal}><Download className="mr-2 h-4 w-4" />Load Local</Button>
-                  <Button size="sm" onClick={applyConfigFromText}><Check className="mr-2 h-4 w-4" />Apply</Button>
-                </div>
-                {configMessage ? (
-                  <p className={cn("inline-flex items-center gap-1.5 text-xs", configStatusTone === "error" ? "text-red-500" : "text-muted-foreground")}>
-                    <Circle className={cn("h-2.5 w-2.5", configStatusTone === "success" ? "fill-green-500 text-green-500" : "fill-red-500 text-red-500")} />
-                    {configMessage}
-                  </p>
-                ) : null}
-              </div>
-            )}
-          </div>
-
-          {/* ── AI Animator ──────────────────────────────────────── */}
-          <AiChatPanel
-            layerItems={layerItems}
-            animationTracks={animationTracks}
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            setAnimationTracks={setTracksWithHistory as unknown as (t: any[]) => void}
-            timelineLengthVh={timelineLengthVh}
-            setTimelineLengthVh={(vh) => { setTimelineLengthVh(vh); setHasUnsavedChanges(true); scheduleAutosave(); }}
-            settings={settings}
-            patchSettings={patchSettings}
-            pointLights={pointLights}
-            setPointLights={(lights) => { setPointLights(lights); setHasUnsavedChanges(true); scheduleAutosave(); }}
-            projectId={currentProjectId}
-            addLog={addLog}
-            onOperationsApplied={fitModelToCamera}
-            onExplodedView={(centroid, maxOffset) => {
-              const camera = cameraRef.current;
-              const controls = orbitControlsRef.current;
-              if (!camera || !controls) return;
-              const fovRad = THREE.MathUtils.degToRad(camera.fov);
-              const distance = (maxOffset / Math.tan(fovRad / 2)) * 2.0;
-              const direction = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
-              camera.position.set(centroid.x, centroid.y, centroid.z).addScaledVector(direction, distance);
-              controls.target.set(centroid.x, centroid.y, centroid.z);
-              controls.update();
-              setPinnedCameraView({
-                position: [camera.position.x, camera.position.y, camera.position.z],
-                target: [controls.target.x, controls.target.y, controls.target.z],
-                fov: camera.fov,
-                zoom: camera.zoom,
-              });
-              setHasUnsavedChanges(true); scheduleAutosave();
-            }}
-          />
-          </div>}
         </aside>
       ) : null}
 
