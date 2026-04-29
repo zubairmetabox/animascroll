@@ -168,7 +168,7 @@ type AnimationTrack = {
 };
 
 type ViewMode = "animate" | "preview";
-type SectionId = "history" | "environment" | "navigation" | "lighting" | "pointLights" | "variables" | "aiAnimator";
+type SectionId = "history" | "environment" | "cameraControls" | "lighting" | "pointLights" | "variables" | "aiAnimator";
 
 type SavedCameraState = {
   position: [number, number, number];
@@ -1017,14 +1017,14 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const [selectedKfIds, setSelectedKfIds] = useState<Set<string>>(new Set());
   const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number; top: number; bottom: number; startX: number; endX: number } | null>(null);
   const [showEnv, setShowEnv] = useState(true);
-  const [showNav, setShowNav] = useState(false);
+  const [showCameraControls, setShowCameraControls] = useState(false);
   const [showLighting, setShowLighting] = useState(true);
   const [showPointLights, setShowPointLights] = useState(false);
   const [showVariables, setShowVariables] = useState(false);
   const [aiAnimatorOpen, setAiAnimatorOpen] = useState(false);
   const [panelLayout, setPanelLayout] = useState<{ left: SectionId[]; right: SectionId[] }>({
     left: ["history"],
-    right: ["environment", "navigation", "lighting", "pointLights", "variables", "aiAnimator"],
+    right: ["environment", "cameraControls", "lighting", "pointLights", "variables", "aiAnimator"],
   });
   const panelDragIdRef = useRef<SectionId | null>(null);
   const [dropIndicator, setDropIndicator] = useState<{ panel: "left" | "right"; idx: number } | null>(null);
@@ -2146,7 +2146,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
         if (prefs.panelLayout?.left && prefs.panelLayout?.right) setPanelLayout(prefs.panelLayout);
         if (prefs.sectionsOpen) {
           if (typeof prefs.sectionsOpen.environment === "boolean") setShowEnv(prefs.sectionsOpen.environment);
-          if (typeof prefs.sectionsOpen.navigation === "boolean") setShowNav(prefs.sectionsOpen.navigation);
+          if (typeof prefs.sectionsOpen.cameraControls === "boolean") setShowCameraControls(prefs.sectionsOpen.cameraControls);
           if (typeof prefs.sectionsOpen.lighting === "boolean") setShowLighting(prefs.sectionsOpen.lighting);
           if (typeof prefs.sectionsOpen.pointLights === "boolean") setShowPointLights(prefs.sectionsOpen.pointLights);
           if (typeof prefs.sectionsOpen.variables === "boolean") setShowVariables(prefs.sectionsOpen.variables);
@@ -2175,7 +2175,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
           panelLayout,
           sectionsOpen: {
             environment: showEnv,
-            navigation: showNav,
+            cameraControls: showCameraControls,
             lighting: showLighting,
             pointLights: showPointLights,
             variables: showVariables,
@@ -2187,7 +2187,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
       }).catch(() => {});
     }, 1000);
     return () => { if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current); };
-  }, [leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showNav, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
+  }, [leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showCameraControls, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
 
   useEffect(() => {
     if (animationTracks.length === 0) return;
@@ -4211,7 +4211,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const sectionOpenState: Record<SectionId, [boolean, (v: boolean) => void]> = {
     history: [historyOpen, setHistoryOpen],
     environment: [showEnv, setShowEnv],
-    navigation: [showNav, setShowNav],
+    cameraControls: [showCameraControls, setShowCameraControls],
     lighting: [showLighting, setShowLighting],
     pointLights: [showPointLights, setShowPointLights],
     variables: [showVariables, setShowVariables],
@@ -4221,7 +4221,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const sectionMeta: Record<SectionId, { label: string; icon: React.ReactNode }> = {
     history:      { label: "History",                 icon: <History    className="h-4 w-4 text-muted-foreground" /> },
     environment:  { label: "Environment",             icon: <Globe2     className="h-4 w-4 text-muted-foreground" /> },
-    navigation:   { label: "Navigation",              icon: <Camera     className="h-4 w-4 text-muted-foreground" /> },
+    cameraControls: { label: "Camera Controls",        icon: <Camera     className="h-4 w-4 text-muted-foreground" /> },
     lighting:     { label: "Lighting",                icon: <Lightbulb  className="h-4 w-4 text-muted-foreground" /> },
     pointLights:  { label: "Additional Light Sources",icon: <Plus       className="h-4 w-4 text-muted-foreground" /> },
     variables:    { label: "Variables",               icon: <Code2      className="h-4 w-4 text-muted-foreground" /> },
@@ -4239,8 +4239,8 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
             <ToggleField label="Show grid" checked={settings.showGrid} onChange={(v) => patchSettings({ showGrid: v })} />
           </div>
         ) : null;
-      case "navigation":
-        return showNav ? (
+      case "cameraControls":
+        return showCameraControls ? (
           <div className="space-y-3 px-3 pb-3 pt-1">
             <ToggleField label="Enable zoom" checked={settings.orbitEnableZoom} onChange={(v) => patchSettings({ orbitEnableZoom: v })} />
             <ToggleField label="Auto rotate" checked={settings.orbitAutoRotate} onChange={(v) => patchSettings({ orbitAutoRotate: v })} />
