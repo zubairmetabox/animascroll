@@ -43,7 +43,6 @@ import {
   Sparkles,
   Link2,
   HelpCircle,
-  LayoutPanelLeft,
   GripVertical,
 } from "lucide-react";
 import * as THREE from "three";
@@ -1006,7 +1005,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [isModelUploading, setIsModelUploading] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("animate");
-  const [workspace, setWorkspace] = useState<"full" | "framed">("framed");
   const [leftPanelWidth, setLeftPanelWidth] = useState(280);
   const [rightPanelWidth, setRightPanelWidth] = useState(280);
   const [pinnedCameraView, setPinnedCameraView] = useState<CameraView | null>(null);
@@ -2142,7 +2140,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       .then((r) => r.ok ? r.json() : null)
       .then((prefs) => {
         if (!prefs) return;
-        if (prefs.workspace) setWorkspace(prefs.workspace);
         if (typeof prefs.leftPanelWidth === "number") setLeftPanelWidth(prefs.leftPanelWidth);
         if (typeof prefs.rightPanelWidth === "number") setRightPanelWidth(prefs.rightPanelWidth);
         if (prefs.panelLayout?.left && prefs.panelLayout?.right) setPanelLayout(prefs.panelLayout);
@@ -2172,7 +2169,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          workspace,
           leftPanelWidth,
           rightPanelWidth,
           panelLayout,
@@ -2190,7 +2186,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       }).catch(() => {});
     }, 1000);
     return () => { if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current); };
-  }, [workspace, leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showNav, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
+  }, [leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showNav, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
 
   useEffect(() => {
     if (animationTracks.length === 0) return;
@@ -4187,7 +4183,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     </div>
   );
 
-  const isFramed = workspace === "framed" && hasModel && viewMode !== "preview";
+  const isFramed = hasModel && viewMode !== "preview";
   const FRAMED_TOP = 36;
   const HANDLE_W = 4;
 
@@ -4370,7 +4366,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const renderPanel = (side: "left" | "right"): React.ReactNode => {
     const ids = panelLayout[side];
     return (
-      <div className={isFramed ? "" : "overflow-hidden rounded-xl border border-border bg-card/95 backdrop-blur-sm w-[280px]"}>
+      <div>
         {ids.filter((id) => !hiddenSections.has(id)).map((id, idx) => {
           const meta = sectionMeta[id];
           const [open, setOpen] = sectionOpenState[id];
@@ -4432,9 +4428,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     >
       <div
         className="absolute"
-        style={isFramed
-          ? { top: FRAMED_TOP, left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W, bottom: timelineActualHeight }
-          : { inset: 0 }}
+        style={{ top: FRAMED_TOP, left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W, bottom: timelineActualHeight }}
       >
         {hasModel ? (
           <>
@@ -4609,12 +4603,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       {/* ── Floating menu buttons — only after a model is loaded, not in preview ─── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className={cn(
-            "absolute left-4 z-[60] flex items-center gap-0.5 px-1",
-            isFramed
-              ? "top-0 h-9 py-0"
-              : "top-3 rounded-lg border border-border/40 bg-card/90 py-0.5 backdrop-blur-sm"
-          )}
+          className="absolute left-4 top-0 h-9 z-[60] flex items-center gap-0.5 px-1 py-0"
           onPointerDown={(e) => e.stopPropagation()}
         >
           <button
@@ -4968,44 +4957,11 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         </>
       )}
 
-      {/* ── Workspace selector — centred in top bar ──────────────────────── */}
-      {hasModel && viewMode !== "preview" ? (
-        <div
-          className="absolute left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2"
-          style={{ top: 0, height: FRAMED_TOP }}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <span className="text-xs text-muted-foreground">Workspace :</span>
-          <div className={cn(
-            "flex items-center gap-0.5 rounded-md p-0.5",
-            isFramed ? "bg-muted/40" : "border border-border/40 bg-card/90 backdrop-blur-sm"
-          )}>
-            <Button
-              size="sm"
-              variant={workspace === "framed" ? "secondary" : "ghost"}
-              className="h-6 px-2.5 text-xs"
-              onClick={() => setWorkspace("framed")}
-            >
-              <LayoutPanelLeft className="mr-1 h-3 w-3" />Framed
-            </Button>
-            <Button
-              size="sm"
-              variant={workspace === "full" ? "secondary" : "ghost"}
-              className="h-6 px-2.5 text-xs"
-              onClick={() => setWorkspace("full")}
-            >
-              <Maximize2 className="mr-1 h-3 w-3" />Full
-            </Button>
-          </div>
-        </div>
-      ) : null}
 
       {hasModel && viewMode === "animate" ? (
         <aside
-          className={cn("z-50", isFramed
-            ? "absolute overflow-y-auto border-r border-border bg-[#0d1117]"
-            : "absolute left-4 top-16 w-fit space-y-2")}
-          style={isFramed ? { top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" } : undefined}
+          className="absolute z-50 overflow-y-auto border-r border-border bg-[#0d1117]"
+          style={{ top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" }}
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("left", panelLayout.left.length); }}
         >
@@ -5026,12 +4982,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       {/* ── Navigate / Animate / Preview mode toggle — top-right ─────────── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className={cn(
-            "absolute right-4 z-[60] flex items-center gap-1 px-1",
-            isFramed
-              ? "top-0 h-9 py-0"
-              : "top-3 rounded-lg border border-border/40 bg-card/90 py-0.5 backdrop-blur-sm"
-          )}
+          className="absolute right-4 top-0 h-9 z-[60] flex items-center gap-1 px-1 py-0"
           onPointerDown={(e) => e.stopPropagation()}
         >
           {viewMode === "animate" && modelScene ? (
@@ -5218,10 +5169,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       {hasModel && viewMode !== "preview" ? (
         <aside
-          className={cn("z-50", isFramed
-            ? "absolute overflow-y-auto border-l border-border bg-[#0d1117]"
-            : "absolute right-4 top-16 w-fit space-y-2")}
-          style={isFramed ? { top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" } : undefined}
+          className="absolute z-50 overflow-y-auto border-l border-border bg-[#0d1117]"
+          style={{ top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" }}
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("right", panelLayout.right.length); }}
         >
@@ -5411,7 +5360,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               timelineResizeRef.current = { startY: e.clientY, startHeight: timelinePanelHeight };
             }}
           />
-          <Card className={cn("pointer-events-auto border bg-card/95 backdrop-blur", isFramed && "rounded-none")}>
+          <Card className="pointer-events-auto rounded-none border bg-card/95 backdrop-blur">
             <CardContent className="space-y-2 px-3 py-2">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
