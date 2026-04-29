@@ -25,7 +25,7 @@ export async function GET() {
   if (rows.length === 0) {
     const seeded = await sql`
       INSERT INTO projects (user_id, name, model_blob_url, model_filename, is_sample)
-      VALUES (${userId}, 'Racket — Sample Project', '/temp/Racket.glb', 'Racket.glb', TRUE)
+      VALUES (${userId}, 'Racket — Sample Project', '/models/Racket.glb', 'Racket.glb', TRUE)
       RETURNING id, name, model_filename, model_blob_url, thumbnail_url, updated_at, is_sample
     `;
     return NextResponse.json({ projects: seeded });
