@@ -139,6 +139,28 @@ function getOrCapturePivot(obj) {
   return pivotMap[obj.name];
 }
 
+// Per-object scale pivot: same drift-free pattern as rotation.
+const scalePivotMap = {};
+function getOrCaptureScalePivot(obj) {
+  if (scalePivotMap[obj.name]) return scalePivotMap[obj.name];
+  const bbox = new THREE.Box3().setFromObject(obj);
+  if (bbox.isEmpty()) return null;
+  const centerWorld = new THREE.Vector3();
+  bbox.getCenter(centerWorld);
+  const centerLocal = obj.parent
+    ? obj.parent.worldToLocal(centerWorld.clone())
+    : centerWorld.clone();
+  scalePivotMap[obj.name] = {
+    centerLocal,
+    basePos: obj.position.clone(),
+    baseScale: obj.scale.x,
+  };
+  return scalePivotMap[obj.name];
+}
+
+// Camera dolly: direction from target to camera, captured once on first dolly track evaluation.
+let dollyCapture = null;
+
 function applyValue(obj, propertyId, value) {
   switch (propertyId) {
     case 'position.x': obj.position.x = value; break;
@@ -164,7 +186,16 @@ function applyValue(obj, propertyId, value) {
       obj.rotation.set(newRotX, newRotY, newRotZ, obj.rotation.order);
       break;
     }
-    case 'scale.uniform': obj.scale.setScalar(value); break;
+    case 'scale.uniform': {
+      const scalePivot = getOrCaptureScalePivot(obj);
+      obj.scale.setScalar(value);
+      if (scalePivot && Math.abs(scalePivot.baseScale) > 1e-9) {
+        const ratio = value / scalePivot.baseScale;
+        const V = new THREE.Vector3().subVectors(scalePivot.centerLocal, scalePivot.basePos);
+        obj.position.subVectors(scalePivot.centerLocal, V.multiplyScalar(ratio));
+      }
+      break;
+    }
     case 'opacity':
       obj.traverse(function(child) {
         if (child.isMesh && child.material) {
@@ -179,6 +210,29 @@ function applyValue(obj, propertyId, value) {
 
 function applyTracks() {
   CFG.tracks.forEach(function(track) {
+    if (track.layerName === '__camera__') {
+      const value = evaluateTrack(track, currentVh);
+      if (track.propertyId === 'camera.fov') {
+        camera.fov = Math.min(Math.max(value, 10), 120);
+        camera.updateProjectionMatrix();
+      } else if (track.propertyId === 'camera.dolly') {
+        if (!dollyCapture && CFG.pinnedCamera) {
+          const tgt = new THREE.Vector3(
+            CFG.pinnedCamera.target[0],
+            CFG.pinnedCamera.target[1],
+            CFG.pinnedCamera.target[2]
+          );
+          dollyCapture = {
+            direction: camera.position.clone().sub(tgt).normalize(),
+            target: tgt,
+          };
+        }
+        if (dollyCapture && value > 0) {
+          camera.position.copy(dollyCapture.target).addScaledVector(dollyCapture.direction, value);
+        }
+      }
+      return;
+    }
     const obj = objMap[track.layerName];
     if (!obj) return;
     applyValue(obj, track.propertyId, evaluateTrack(track, currentVh));

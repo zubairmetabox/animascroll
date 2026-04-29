@@ -35,6 +35,43 @@ body {
   @apply bg-background text-foreground antialiased;
 }
 
+/* ── Sleek dark scrollbars ───────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(217 15% 28%);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(217 15% 40%);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(217 15% 28%) transparent;
+}
+
+/* Timeline horizontal scrollbar — slightly taller for easier grabbing */
+.timeline-scroll::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+.timeline-scroll::-webkit-scrollbar-thumb {
+  background: hsl(217 15% 32%);
+  border-radius: 9999px;
+}
+.timeline-scroll::-webkit-scrollbar-thumb:hover {
+  background: hsl(201 78% 42%);
+}
+
 /* Hide native number input spin buttons */
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {

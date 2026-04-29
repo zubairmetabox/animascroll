@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { Plus, Trash2, ToggleLeft, ToggleRight, ChevronRight, Loader2, Save } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type SkillEntry = {
   slug: string;
@@ -19,10 +21,6 @@ type Props = {
 };
 
 // ── tiny helpers ──────────────────────────────────────────────────────────
-
-function fmtDate(iso: string) {
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
 
 function keywordsToStr(kw: string[]) {
   return kw.join(", ");
@@ -48,6 +46,45 @@ function emptyEditor(): EditorState {
   return { slug: null, name: "", keywords: "", description: "", body: "", enabled: true, dirty: false };
 }
 
+// ── Markdown preview renderer ─────────────────────────────────────────────
+
+function SkillPreview({ md }: { md: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        h1: ({ children }) => <h1 className="text-base font-bold text-zinc-100 mb-3 mt-1">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-sm font-semibold text-zinc-100 mt-5 mb-2 border-b border-zinc-800 pb-1">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-xs font-semibold text-zinc-200 mt-4 mb-1">{children}</h3>,
+        p: ({ children }) => <p className="text-zinc-300 text-xs leading-relaxed mb-2">{children}</p>,
+        ul: ({ children }) => <ul className="list-disc list-inside space-y-1 mb-2 text-zinc-300 text-xs">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal list-inside space-y-1 mb-2 text-zinc-300 text-xs">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        strong: ({ children }) => <strong className="text-zinc-100 font-semibold">{children}</strong>,
+        code: ({ children, className }) =>
+          className ? (
+            <code className="block bg-zinc-900 border border-zinc-700 rounded p-2 text-[11px] text-emerald-400 overflow-x-auto mb-2 whitespace-pre font-mono">{children}</code>
+          ) : (
+            <code className="bg-zinc-900 text-emerald-400 rounded px-1 py-0.5 text-[11px] font-mono">{children}</code>
+          ),
+        pre: ({ children }) => <pre className="mb-2">{children}</pre>,
+        hr: () => <hr className="border-zinc-800 my-4" />,
+        table: ({ children }) => (
+          <div className="overflow-x-auto mb-3">
+            <table className="w-full text-xs border-collapse">{children}</table>
+          </div>
+        ),
+        thead: ({ children }) => <thead>{children}</thead>,
+        th: ({ children }) => <th className="text-left text-zinc-300 font-medium px-2 py-1.5 border-b border-zinc-700">{children}</th>,
+        td: ({ children }) => <td className="text-zinc-400 px-2 py-1.5 border-b border-zinc-800">{children}</td>,
+        blockquote: ({ children }) => <blockquote className="border-l-2 border-zinc-600 pl-3 italic text-zinc-400 mb-2">{children}</blockquote>,
+      }}
+    >
+      {md}
+    </ReactMarkdown>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────
 
 export default function SkillsManager({ mode = "page" }: Props) {
@@ -56,6 +93,7 @@ export default function SkillsManager({ mode = "page" }: Props) {
   const [saving, setSaving] = useState(false);
   const [editor, setEditor] = useState<EditorState>(emptyEditor());
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [bodyView, setBodyView] = useState<"raw" | "preview">("raw");
   const bodyRef = useRef<HTMLTextAreaElement>(null);
 
   // ── Fetch skill list ────────────────────────────────────────────────────
@@ -77,6 +115,7 @@ export default function SkillsManager({ mode = "page" }: Props) {
 
   const selectSkill = useCallback(async (entry: SkillEntry) => {
     setSelectedSlug(entry.slug);
+    setBodyView("raw");
     setEditor((prev) => ({
       ...prev,
       slug: entry.slug,
@@ -104,6 +143,7 @@ export default function SkillsManager({ mode = "page" }: Props) {
 
   const startNew = () => {
     setSelectedSlug(null);
+    setBodyView("raw");
     setEditor({ ...emptyEditor(), dirty: true });
     bodyRef.current?.focus();
   };
@@ -154,18 +194,15 @@ export default function SkillsManager({ mode = "page" }: Props) {
 
   const toggleEnabled = useCallback(async (entry: SkillEntry) => {
     const next = !entry.enabled;
-    // Optimistic update — both list and editor update instantly
     setSkills((prev) => prev.map((s) => s.slug === entry.slug ? { ...s, enabled: next } : s));
     if (editor.slug === entry.slug) {
       setEditor((prev) => ({ ...prev, enabled: next }));
     }
-    // Persist in background
     fetch(`/api/skills/${entry.slug}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: next }),
     }).catch(() => {
-      // Revert on failure
       setSkills((prev) => prev.map((s) => s.slug === entry.slug ? { ...s, enabled: !next } : s));
       if (editor.slug === entry.slug) {
         setEditor((prev) => ({ ...prev, enabled: !next }));
@@ -202,7 +239,7 @@ export default function SkillsManager({ mode = "page" }: Props) {
 
   const containerCls = mode === "modal"
     ? "flex h-[calc(100vh-8rem)] max-h-[700px] overflow-hidden"
-    : "flex h-full overflow-hidden";
+    : "flex flex-1 min-h-0 overflow-hidden";
 
   return (
     <div className={containerCls}>
@@ -254,7 +291,7 @@ export default function SkillsManager({ mode = "page" }: Props) {
       </aside>
 
       {/* ── Right panel: editor ───────────────────────────────────────────── */}
-      <main className="flex-1 flex flex-col overflow-hidden bg-zinc-950">
+      <main className="flex-1 flex flex-col min-h-0 overflow-hidden bg-zinc-950">
         {!editor.slug && !editor.dirty ? (
           /* Empty state */
           <div className="flex-1 flex flex-col items-center justify-center text-zinc-500 gap-3">
@@ -331,17 +368,51 @@ export default function SkillsManager({ mode = "page" }: Props) {
               />
             </div>
 
-            {/* Body textarea */}
-            <div className="flex-1 overflow-hidden flex flex-col px-4 py-3">
-              <p className="text-[10px] text-zinc-600 mb-1.5 uppercase tracking-wide">Skill body (markdown + JSON examples)</p>
-              <textarea
-                ref={bodyRef}
-                className="flex-1 w-full bg-transparent text-zinc-300 text-xs font-mono resize-none outline-none placeholder:text-zinc-700 leading-relaxed"
-                placeholder={`Describe how to produce this animation technique.\nInclude example JSON operations.\n\nExample:\n\`\`\`json\n[\n  { "type": "set_track", "layerId": "{{layer}}", "propertyId": "position.y", "keyframes": [...] }\n]\n\`\`\``}
-                value={editor.body}
-                onChange={(e) => setEditor((prev) => ({ ...prev, body: e.target.value, dirty: true }))}
-                spellCheck={false}
-              />
+            {/* Body area — raw / preview toggle */}
+            <div className="flex-1 min-h-0 flex flex-col">
+              {/* Sub-toolbar */}
+              <div className="flex items-center gap-0.5 px-4 py-2 border-b border-zinc-800 shrink-0">
+                <button
+                  onClick={() => setBodyView("raw")}
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                    bodyView === "raw"
+                      ? "bg-zinc-700 text-white"
+                      : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                  }`}
+                >
+                  Raw
+                </button>
+                <button
+                  onClick={() => setBodyView("preview")}
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                    bodyView === "preview"
+                      ? "bg-zinc-700 text-white"
+                      : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                  }`}
+                >
+                  Preview
+                </button>
+              </div>
+
+              {/* Body content */}
+              {bodyView === "raw" ? (
+                <textarea
+                  ref={bodyRef}
+                  className="flex-1 w-full min-h-0 bg-transparent text-zinc-300 text-xs font-mono resize-none outline-none placeholder:text-zinc-700 leading-relaxed px-4 py-3"
+                  placeholder={`Describe how to produce this animation technique.\nInclude example JSON operations.\n\nExample:\n\`\`\`json\n[\n  { "type": "set_track", "layerId": "{{layer}}", "propertyId": "position.y", "keyframes": [...] }\n]\n\`\`\``}
+                  value={editor.body}
+                  onChange={(e) => setEditor((prev) => ({ ...prev, body: e.target.value, dirty: true }))}
+                  spellCheck={false}
+                />
+              ) : (
+                <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+                  {editor.body.trim() ? (
+                    <SkillPreview md={editor.body} />
+                  ) : (
+                    <p className="text-zinc-600 text-xs italic">Nothing to preview yet.</p>
+                  )}
+                </div>
+              )}
             </div>
 
             {editor.dirty && (

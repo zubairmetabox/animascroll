@@ -37,6 +37,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     operations?: unknown;
   };
 
+  if (!["user", "assistant"].includes(body.role)) {
+    return NextResponse.json({ error: "Invalid role" }, { status: 400 });
+  }
+
   const rows = await sql`
     INSERT INTO chat_messages (project_id, role, content, operations)
     VALUES (

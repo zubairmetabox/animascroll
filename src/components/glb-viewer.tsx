@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { Bounds, Center, OrbitControls, PerspectiveCamera, TransformControls } from "@react-three/drei";
+import { Bounds, Center, Environment, OrbitControls, PerspectiveCamera, TransformControls } from "@react-three/drei";
 import { EffectComposer, Outline } from "@react-three/postprocessing";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import {
-  Box,
   Camera,
   Check,
   Clock3,
@@ -29,7 +30,6 @@ import {
   RotateCcw,
   Redo2,
   Save,
-  Settings2,
   Trash2,
   Undo2,
   Upload,
@@ -40,6 +40,8 @@ import {
   Move,
   Sparkles,
   Link2,
+  HelpCircle,
+  GripVertical,
 } from "lucide-react";
 import * as THREE from "three";
 import type {
@@ -61,7 +63,10 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import SkillsManager from "@/components/skills-manager";
+import { AiKeySettings } from "@/components/ai-key-settings";
 import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animation-html";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type ViewerSettings = {
   backgroundColor: string;
@@ -75,6 +80,10 @@ type ViewerSettings = {
   directionalZ: number;
   orbitEnableZoom: boolean;
   orbitAutoRotate: boolean;
+  useEnvironmentMap: boolean;
+  environmentPreset: string;
+  environmentIntensity: number;
+  toneMappingExposure: number;
 };
 
 type PointLightConfig = {
@@ -89,12 +98,21 @@ type PointLightConfig = {
   decay: number;
 };
 
+type LayerTransform = {
+  layerName: string;
+  position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number }; // degrees
+  scale: number;
+  opacity: number;
+};
+
 type ConfigPayload = {
   settings: ViewerSettings;
   pointLights: PointLightConfig[];
   pinnedCameraView?: CameraView;
   timelineLengthVh?: number;
   animationTracks?: AnimationTrack[];
+  layerTransforms?: LayerTransform[];
 };
 
 
@@ -150,6 +168,7 @@ type AnimationTrack = {
 };
 
 type ViewMode = "animate" | "preview";
+type SectionId = "history" | "environment" | "navigation" | "lighting" | "pointLights" | "variables" | "aiAnimator";
 
 type CameraView = {
   position: [number, number, number];
@@ -177,6 +196,15 @@ const TIMELINE_PROPERTIES = [
   { id: "opacity", label: "Opacity" },
 ] as const;
 
+// Sentinel layer ID for the camera pseudo-layer in the timeline.
+// Not a real Three.js UUID — used to route camera property tracks.
+const CAMERA_LAYER_ID = "__camera__";
+
+const CAMERA_TIMELINE_PROPERTIES = [
+  { id: "camera.fov",   label: "Camera Zoom" },
+  { id: "camera.dolly", label: "Camera Dolly" },
+] as const;
+
 const DEFAULT_SETTINGS: ViewerSettings = {
   backgroundColor: "#0b0f13",
   showGrid: true,
@@ -189,6 +217,10 @@ const DEFAULT_SETTINGS: ViewerSettings = {
   directionalZ: 4,
   orbitEnableZoom: true,
   orbitAutoRotate: false,
+  useEnvironmentMap: true,
+  environmentPreset: "neutral",
+  environmentIntensity: 1,
+  toneMappingExposure: 1.0,
 };
 
 function createDefaultPointLight(index: number): PointLightConfig {
@@ -260,6 +292,72 @@ function disposeScene(scene: THREE.Object3D) {
     }
     mesh.material.dispose();
   });
+}
+
+function RendererConfig({ exposure }: { exposure: number }) {
+  useFrame(({ gl }) => {
+    if (gl.toneMappingExposure !== exposure) {
+      gl.toneMappingExposure = exposure;
+    }
+  });
+  return null;
+}
+
+// Module-level so loadFile can apply the env map directly to new model materials.
+const _pmremEnvRef: { texture: THREE.Texture | null } = { texture: null };
+
+function applyEnvMapToScene(scene: THREE.Object3D, texture: THREE.Texture) {
+  scene.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) {
+      const m = mat as THREE.MeshStandardMaterial;
+      if (!m.isMeshStandardMaterial) continue;
+      m.envMap = texture;
+      // Ensure env map contributes — bump to 1 if 0/unset (some exporters leave it at 0)
+      if (!m.envMapIntensity) {
+        m.envMapIntensity = 1;
+      }
+      // Reset full glass transmission on non-metallic materials only.
+      // transmission=1 on fabric/plastic is an export bug (e.g. NASA models).
+      // Metallic parts may legitimately use partial transmission for surface effects.
+      const phys = m as THREE.MeshPhysicalMaterial;
+      if (phys.isMeshPhysicalMaterial && phys.transmission >= 1.0 && m.metalness < 0.5) {
+        phys.transmission = 0;
+      }
+      m.needsUpdate = true;
+    }
+  });
+}
+
+// Self-contained studio lighting — no CDN, no external files.
+// Uses Three.js RoomEnvironment + PMREMGenerator to provide correct PBR/IBL.
+// Runs in useFrame (before draw) so the env map is ready on frame 1.
+// Also applies the env map directly to every material in the scene (belt+suspenders).
+function NeutralEnvironment({ intensity }: { intensity: number }) {
+  useFrame(({ gl, scene }) => {
+    const s = scene as THREE.Scene;
+    if (!_pmremEnvRef.texture) {
+      const generator = new THREE.PMREMGenerator(gl);
+      _pmremEnvRef.texture = generator.fromScene(new RoomEnvironment(), 0.04).texture;
+      generator.dispose();
+      // Set on scene for any materials that use scene.environment
+      s.environment = _pmremEnvRef.texture;
+      // Also apply directly so materials that compiled without envMap get it too
+      applyEnvMapToScene(s, _pmremEnvRef.texture);
+    }
+    if (s.environmentIntensity !== intensity) {
+      s.environmentIntensity = intensity;
+    }
+  });
+
+  useEffect(() => () => {
+    _pmremEnvRef.texture?.dispose();
+    _pmremEnvRef.texture = null;
+  }, []);
+
+  return null;
 }
 
 function SceneGrid({
@@ -561,11 +659,84 @@ function ScrubbableNumberField({
   );
 }
 
+// Timeline property number input — uses local string state while focused so
+// partial inputs like "0." and "-" aren't eaten by React's controlled-value reset.
+function PropertyNumberInput({
+  value,
+  step,
+  onBeginEdit,
+  onApply,
+  onCommit,
+}: {
+  value: number;
+  step: string;
+  onBeginEdit: () => void;
+  onApply: (rawValue: string) => void;
+  onCommit: () => void;
+}) {
+  const [localStr, setLocalStr] = useState<string | null>(null);
+  const editing = localStr !== null;
+  return (
+    <Input
+      type="number"
+      step={step}
+      value={editing ? localStr : value}
+      onFocus={() => {
+        setLocalStr(String(value));
+        onBeginEdit();
+      }}
+      onChange={(e) => {
+        setLocalStr(e.target.value);
+        onApply(e.target.value);
+      }}
+      onBlur={() => {
+        setLocalStr(null);
+        onCommit();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") { setLocalStr(null); e.currentTarget.blur(); }
+      }}
+      className="h-6 w-24 shrink-0 text-[11px]"
+    />
+  );
+}
+
+function TimelineLengthInput({ value, onChange }: { value: number; onChange: (raw: string) => void }) {
+  const [localStr, setLocalStr] = useState<string | null>(null);
+  const editing = localStr !== null;
+  return (
+    <Input
+      id="timeline-length"
+      type="number"
+      min={50}
+      max={5000}
+      step={10}
+      value={editing ? localStr : value}
+      onFocus={() => setLocalStr(String(value))}
+      onChange={(e) => { setLocalStr(e.target.value); onChange(e.target.value); }}
+      onBlur={() => setLocalStr(null)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") { setLocalStr(null); e.currentTarget.blur(); }
+      }}
+      className="h-8 w-24 text-xs"
+    />
+  );
+}
+
+// "neutral" = local RoomEnvironment (no CDN); others fetch from Polyhaven CDN via drei
+const ENV_PRESETS = ["neutral", "studio", "city", "dawn", "forest", "lobby", "night", "park", "sunset", "warehouse"] as const;
+type EnvPreset = typeof ENV_PRESETS[number];
+
 function clampSettings(raw: ViewerSettings): ViewerSettings {
   return {
     ...raw,
     ambientIntensity: THREE.MathUtils.clamp(raw.ambientIntensity, 0, 3),
     directionalIntensity: THREE.MathUtils.clamp(raw.directionalIntensity, 0, 5),
+    environmentIntensity: THREE.MathUtils.clamp(raw.environmentIntensity ?? 1, 0, 3),
+    environmentPreset: ENV_PRESETS.includes(raw.environmentPreset as EnvPreset) ? raw.environmentPreset : "neutral",
+    toneMappingExposure: THREE.MathUtils.clamp(raw.toneMappingExposure ?? 1.0, 0.1, 5),
   };
 }
 
@@ -784,6 +955,42 @@ function getLayerItems(scene: THREE.Object3D): {
   return { items, objectMap };
 }
 
+function HelpContent({ md }: { md: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+        h1: ({ children }) => <h1 className="text-xl font-bold text-zinc-100 mb-4 mt-2">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-base font-semibold text-zinc-100 mt-8 mb-3 border-b border-zinc-800 pb-1">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-sm font-semibold text-zinc-200 mt-5 mb-2">{children}</h3>,
+        p: ({ children }) => <p className="text-zinc-300 text-sm leading-relaxed mb-3">{children}</p>,
+        ul: ({ children }) => <ul className="list-disc list-inside space-y-1 mb-3 text-zinc-300 text-sm">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal list-inside space-y-1 mb-3 text-zinc-300 text-sm">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        strong: ({ children }) => <strong className="text-zinc-100 font-semibold">{children}</strong>,
+        code: ({ children, className }) =>
+          className ? (
+            <code className="block bg-zinc-800 border border-zinc-700 rounded-lg p-3 text-xs text-emerald-400 overflow-x-auto mb-3 whitespace-pre">{children}</code>
+          ) : (
+            <code className="bg-zinc-800 text-emerald-400 rounded px-1 py-0.5 text-xs">{children}</code>
+          ),
+        pre: ({ children }) => <pre className="mb-3">{children}</pre>,
+        hr: () => <hr className="border-zinc-800 my-6" />,
+        table: ({ children }) => (
+          <div className="overflow-x-auto mb-4">
+            <table className="w-full text-sm border-collapse">{children}</table>
+          </div>
+        ),
+        thead: ({ children }) => <thead>{children}</thead>,
+        th: ({ children }) => <th className="text-left text-zinc-200 font-medium px-3 py-2 border-b border-zinc-700">{children}</th>,
+        td: ({ children }) => <td className="text-zinc-300 px-3 py-2 border-b border-zinc-800">{children}</td>,
+        a: ({ children, href }) => <a href={href} className="text-blue-400 hover:underline">{children}</a>,
+        blockquote: ({ children }) => <blockquote className="border-l-2 border-zinc-600 pl-4 italic text-zinc-400 mb-3">{children}</blockquote>,
+      }}
+    >
+      {md}
+    </ReactMarkdown>
+  );
+}
+
 export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -796,6 +1003,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [isModelUploading, setIsModelUploading] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("animate");
+  const [leftPanelWidth, setLeftPanelWidth] = useState(280);
+  const [rightPanelWidth, setRightPanelWidth] = useState(280);
   const [pinnedCameraView, setPinnedCameraView] = useState<CameraView | null>(null);
   const [timelineLengthVh, setTimelineLengthVh] = useState(200);
   const [timelineCurrentVh, setTimelineCurrentVh] = useState(0);
@@ -807,12 +1016,30 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
   const [selectedKfIds, setSelectedKfIds] = useState<Set<string>>(new Set());
   const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number; top: number; bottom: number; startX: number; endX: number } | null>(null);
-  const [showCustomize, setShowCustomize] = useState(false);
+  const [showEnv, setShowEnv] = useState(true);
+  const [showNav, setShowNav] = useState(false);
+  const [showLighting, setShowLighting] = useState(true);
+  const [showPointLights, setShowPointLights] = useState(false);
+  const [showVariables, setShowVariables] = useState(false);
+  const [aiAnimatorOpen, setAiAnimatorOpen] = useState(false);
+  const [panelLayout, setPanelLayout] = useState<{ left: SectionId[]; right: SectionId[] }>({
+    left: ["history"],
+    right: ["environment", "navigation", "lighting", "pointLights", "variables", "aiAnimator"],
+  });
+  const panelDragIdRef = useRef<SectionId | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{ panel: "left" | "right"; idx: number } | null>(null);
+  const uiPrefsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uiPrefsLoadedRef = useRef(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const [hiddenSections, setHiddenSections] = useState<Set<SectionId>>(new Set());
   const [logsOpen, setLogsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpMd, setHelpMd] = useState<string | null>(null);
   const [logEvents, setLogEvents] = useState<{ id: string; ts: Date; msg: string }[]>([]);
   const addLog = (msg: string) =>
     setLogEvents((prev) => [{ id: crypto.randomUUID(), ts: new Date(), msg }, ...prev]);
@@ -889,6 +1116,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const reorderLayerRef = useRef<(draggedId: string, targetId: string, insertBefore: boolean) => void>(() => {});
   // pinnedCameraView is kept in state (see useState above) so the config effect re-runs on changes
   const timelineResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const [timelineActualHeight, setTimelineActualHeight] = useState(330);
+  const leftPanelResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const rightPanelResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const timelineSeekDragRef = useRef(false);
   const timelineRulerRef = useRef<HTMLDivElement | null>(null);
   const [timelineScrollEl, setTimelineScrollEl] = useState<HTMLDivElement | null>(null);
@@ -945,6 +1175,21 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     basePos: THREE.Vector3;
     baseQuat: THREE.Quaternion;
   }>>(new Map());
+
+  // Per-layer scale pivot: same pattern as rotation — captured once so scale always
+  // computes position correction from the fixed base, never from current state.
+  const scalePivotRef = useRef<Map<string, {
+    centerLocal: THREE.Vector3;
+    basePos: THREE.Vector3;
+    baseScale: number;
+  }>>(new Map());
+
+  // Camera dolly capture: direction vector + target snapshot taken on the first
+  // dolly keyframe evaluation. Keeps camera on a fixed axis as distance changes.
+  const dollyCaptureRef = useRef<{
+    direction: THREE.Vector3;
+    target: THREE.Vector3;
+  } | null>(null);
 
   const togglePlayRef = useRef<() => void>(() => {});
   togglePlayRef.current = () => {
@@ -1019,9 +1264,11 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
     // Body height = timeline length + one extra viewport so the final frame is reachable
     const prevBodyHeight = document.body.style.height;
-    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevHtmlOverflowX = document.documentElement.style.overflowX;
+    const prevHtmlOverflowY = document.documentElement.style.overflowY;
     document.body.style.height = `${timelineLengthVh + 100}vh`;
-    document.documentElement.style.overflow = "auto";
+    document.documentElement.style.overflowX = "hidden";
+    document.documentElement.style.overflowY = "auto";
 
     const onScroll = () => {
       const maxScroll = (timelineLengthVh / 100) * window.innerHeight;
@@ -1041,7 +1288,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       document.body.style.height = prevBodyHeight;
-      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.documentElement.style.overflowX = prevHtmlOverflowX;
+      document.documentElement.style.overflowY = prevHtmlOverflowY;
       window.scrollTo(0, 0);
     };
   }, [viewMode, timelineLengthVh]);
@@ -1054,6 +1302,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const getLayerName = (layerId: string) => {
+    if (layerId === CAMERA_LAYER_ID) return CAMERA_LAYER_ID;
     const fromList = layerItems.find((layer) => layer.id === layerId)?.name;
     if (fromList) return fromList;
     const object = layerObjectMapRef.current.get(layerId);
@@ -1127,11 +1376,11 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   }, [kfContextMenu]);
 
   useEffect(() => {
-    if (!fileMenuOpen && !editMenuOpen && !shareMenuOpen) return;
-    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); setShareMenuOpen(false); };
+    if (!fileMenuOpen && !editMenuOpen && !viewMenuOpen && !shareMenuOpen) return;
+    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); setViewMenuOpen(false); setShareMenuOpen(false); };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
-  }, [fileMenuOpen, editMenuOpen, shareMenuOpen]);
+  }, [fileMenuOpen, editMenuOpen, viewMenuOpen, shareMenuOpen]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -1155,6 +1404,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     return () => { document.body.style.userSelect = ""; };
   }, [rubberBandVh]);
 
+
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
       const drag = timelineResizeRef.current;
@@ -1162,6 +1412,14 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         const delta = drag.startY - event.clientY;
         const next = THREE.MathUtils.clamp(Math.round(drag.startHeight + delta), 28, 560);
         setTimelinePanelHeight(next);
+      }
+      if (leftPanelResizeDragRef.current) {
+        const { startX, startWidth } = leftPanelResizeDragRef.current;
+        setLeftPanelWidth(THREE.MathUtils.clamp(startWidth + (event.clientX - startX), 240, 520));
+      }
+      if (rightPanelResizeDragRef.current) {
+        const { startX, startWidth } = rightPanelResizeDragRef.current;
+        setRightPanelWidth(THREE.MathUtils.clamp(startWidth - (event.clientX - startX), 240, 520));
       }
 
       const modifierDrag = timelineModifierDragRef.current;
@@ -1294,6 +1552,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     };
     const onPointerUp = () => {
       timelineResizeRef.current = null;
+      leftPanelResizeDragRef.current = null;
+      rightPanelResizeDragRef.current = null;
       timelineSeekDragRef.current = false;
 
       // Commit retime drag
@@ -1416,9 +1676,38 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const getTimelineRows = () => {
     const visibleLayers = getVisibleLayerItems();
     const rows: Array<
-      | { key: string; kind: "layer"; layer: LayerItem }
+      | { key: string; kind: "layer"; layer: LayerItem; isCamera?: boolean }
       | { key: string; kind: "property"; layer: LayerItem; propertyId: string; label: string }
     > = [];
+
+    // Camera pseudo-layer — always at top, not tied to any Three.js object
+    const cameraLayerItem: LayerItem = {
+      id: CAMERA_LAYER_ID,
+      parentId: null,
+      name: "Camera",
+      type: "camera",
+      depth: 0,
+      hasChildren: false,
+      visible: true,
+      opacity: 1,
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      worldPosition: { x: 0, y: 0, z: 0 },
+    };
+    rows.push({ key: "layer-__camera__", kind: "layer", layer: cameraLayerItem, isCamera: true });
+    if (timelineExpandedLayerIds.has(CAMERA_LAYER_ID)) {
+      CAMERA_TIMELINE_PROPERTIES.forEach((property) => {
+        rows.push({
+          key: `prop-__camera__-${property.id}`,
+          kind: "property",
+          layer: cameraLayerItem,
+          propertyId: property.id,
+          label: property.label,
+        });
+      });
+    }
+
     visibleLayers.forEach((layer) => {
       rows.push({ key: `layer-${layer.id}`, kind: "layer", layer });
       if (timelineExpandedLayerIds.has(layer.id)) {
@@ -1626,6 +1915,16 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const getTimelinePropertyValue = (layer: LayerItem, propertyId: string) => {
+    if (layer.id === CAMERA_LAYER_ID) {
+      if (propertyId === "camera.fov") return cameraRef.current?.fov ?? DEFAULT_CAMERA_VIEW.fov;
+      if (propertyId === "camera.dolly") {
+        const cam = cameraRef.current;
+        const ctrl = orbitControlsRef.current;
+        if (cam && ctrl) return cam.position.distanceTo(ctrl.target);
+        return 5;
+      }
+      return 0;
+    }
     switch (propertyId) {
       case "position.x":
         return layer.position.x;
@@ -1652,10 +1951,41 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     if (propertyId.startsWith("rotation.")) return "1";
     if (propertyId === "opacity") return "0.01";
     if (propertyId.startsWith("position.")) return "0.001";
+    if (propertyId === "camera.fov") return "0.5";
+    if (propertyId === "camera.dolly") return "0.01";
     return "0.001";
   };
 
   const applyTimelinePropertyValue = (layer: LayerItem, propertyId: string, rawValue: string) => {
+    // Camera pseudo-layer — apply to the Three.js camera/controls directly
+    if (layer.id === CAMERA_LAYER_ID) {
+      const cam = cameraRef.current;
+      if (!cam) return;
+      if (propertyId === "camera.fov") {
+        const fov = THREE.MathUtils.clamp(Number(rawValue), 10, 120);
+        if (!Number.isNaN(fov)) { cam.fov = fov; cam.updateProjectionMatrix(); }
+        return;
+      }
+      if (propertyId === "camera.dolly") {
+        const dist = Number(rawValue);
+        if (Number.isNaN(dist) || dist <= 0) return;
+        const ctrl = orbitControlsRef.current;
+        if (!dollyCaptureRef.current && ctrl) {
+          dollyCaptureRef.current = {
+            direction: cam.position.clone().sub(ctrl.target).normalize(),
+            target: ctrl.target.clone(),
+          };
+        }
+        if (dollyCaptureRef.current) {
+          const { direction, target } = dollyCaptureRef.current;
+          cam.position.copy(target).addScaledVector(direction, dist);
+          orbitControlsRef.current?.update();
+        }
+        return;
+      }
+      return;
+    }
+
     switch (propertyId) {
       case "position.x":
         updateLayerCoordinate(layer.id, "x", rawValue);
@@ -1714,9 +2044,39 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         syncLayerTransform(layer.id);
         return;
       }
-      case "scale.uniform":
-        updateLayerUniformScale(layer.id, rawValue);
+      case "scale.uniform": {
+        const scaleObj = layerObjectMapRef.current.get(layer.id);
+        if (!scaleObj) return;
+        const scaleVal = THREE.MathUtils.clamp(Number(rawValue), 0.001, 100);
+        if (Number.isNaN(scaleVal)) return;
+        // Same drift-free pivot pattern as rotation: capture bounding-box centre
+        // and base state once, then always compute position correction from that
+        // fixed base rather than from current (potentially accumulated) state.
+        if (!scalePivotRef.current.has(layer.id)) {
+          const bbox = new THREE.Box3().setFromObject(scaleObj);
+          if (!bbox.isEmpty()) {
+            const centerWorld = new THREE.Vector3();
+            bbox.getCenter(centerWorld);
+            const centerLocal = scaleObj.parent
+              ? scaleObj.parent.worldToLocal(centerWorld.clone())
+              : centerWorld.clone();
+            scalePivotRef.current.set(layer.id, {
+              centerLocal,
+              basePos: scaleObj.position.clone(),
+              baseScale: scaleObj.scale.x,
+            });
+          }
+        }
+        const scalePivot = scalePivotRef.current.get(layer.id);
+        scaleObj.scale.setScalar(scaleVal);
+        if (scalePivot && Math.abs(scalePivot.baseScale) > 1e-9) {
+          const ratio = scaleVal / scalePivot.baseScale;
+          const V = new THREE.Vector3().subVectors(scalePivot.centerLocal, scalePivot.basePos);
+          scaleObj.position.subVectors(scalePivot.centerLocal, V.multiplyScalar(ratio));
+        }
+        syncLayerTransform(layer.id);
         return;
+      }
       case "opacity":
         updateLayerOpacity(layer.id, rawValue);
         return;
@@ -1726,12 +2086,22 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const beginTimelinePropertyEdit = (layer: LayerItem, propertyId: string) => {
+    if (layer.id === CAMERA_LAYER_ID) return;
     if (propertyId.startsWith("position.")) beginLayerTransform(layer.id);
     else if (propertyId.startsWith("rotation.")) beginLayerRotation(layer.id);
     else if (propertyId === "scale.uniform") beginLayerScale(layer.id);
   };
 
   const commitTimelinePropertyEdit = (layer: LayerItem, propertyId: string) => {
+    if (layer.id === CAMERA_LAYER_ID) {
+      // Camera properties are applied live; just save keyframe if one exists here
+      const atVh = Number(timelineCurrentVh.toFixed(2));
+      const track = getTrack(layer.id, propertyId);
+      if (track?.keyframes.some((kf) => Number(kf.atVh.toFixed(2)) === atVh)) {
+        upsertKeyframeAtCurrentTime(layer, propertyId);
+      }
+      return;
+    }
     if (propertyId.startsWith("position.")) commitLayerTransform(layer.id);
     else if (propertyId.startsWith("rotation.")) commitLayerRotation(layer.id);
     else if (propertyId === "scale.uniform") commitLayerScale(layer.id);
@@ -1765,9 +2135,86 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     };
   }, []);
 
+  // ── UI prefs: load once on mount ────────────────────────────────────────
+  useEffect(() => {
+    fetch("/api/settings/ui")
+      .then((r) => r.ok ? r.json() : null)
+      .then((prefs) => {
+        if (!prefs) return;
+        if (typeof prefs.leftPanelWidth === "number") setLeftPanelWidth(prefs.leftPanelWidth);
+        if (typeof prefs.rightPanelWidth === "number") setRightPanelWidth(prefs.rightPanelWidth);
+        if (prefs.panelLayout?.left && prefs.panelLayout?.right) setPanelLayout(prefs.panelLayout);
+        if (prefs.sectionsOpen) {
+          if (typeof prefs.sectionsOpen.environment === "boolean") setShowEnv(prefs.sectionsOpen.environment);
+          if (typeof prefs.sectionsOpen.navigation === "boolean") setShowNav(prefs.sectionsOpen.navigation);
+          if (typeof prefs.sectionsOpen.lighting === "boolean") setShowLighting(prefs.sectionsOpen.lighting);
+          if (typeof prefs.sectionsOpen.pointLights === "boolean") setShowPointLights(prefs.sectionsOpen.pointLights);
+          if (typeof prefs.sectionsOpen.variables === "boolean") setShowVariables(prefs.sectionsOpen.variables);
+          if (typeof prefs.sectionsOpen.aiAnimator === "boolean") setAiAnimatorOpen(prefs.sectionsOpen.aiAnimator);
+          if (typeof prefs.sectionsOpen.history === "boolean") setHistoryOpen(prefs.sectionsOpen.history);
+        }
+        if (Array.isArray(prefs.hiddenSections)) {
+          setHiddenSections(new Set(prefs.hiddenSections as SectionId[]));
+        }
+        uiPrefsLoadedRef.current = true;
+      })
+      .catch(() => { uiPrefsLoadedRef.current = true; });
+  }, []);
+
+  // ── UI prefs: debounced save on change (skip until loaded) ──────────────
+  useEffect(() => {
+    if (!uiPrefsLoadedRef.current) return;
+    if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current);
+    uiPrefsSaveTimerRef.current = setTimeout(() => {
+      fetch("/api/settings/ui", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leftPanelWidth,
+          rightPanelWidth,
+          panelLayout,
+          sectionsOpen: {
+            environment: showEnv,
+            navigation: showNav,
+            lighting: showLighting,
+            pointLights: showPointLights,
+            variables: showVariables,
+            aiAnimator: aiAnimatorOpen,
+            history: historyOpen,
+          },
+          hiddenSections: [...hiddenSections],
+        }),
+      }).catch(() => {});
+    }, 1000);
+    return () => { if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current); };
+  }, [leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showNav, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
+
   useEffect(() => {
     if (animationTracks.length === 0) return;
     for (const track of animationTracks) {
+      if (track.layerId === CAMERA_LAYER_ID) {
+        // Camera tracks don't map to a LayerItem — apply directly to the camera
+        const value = evaluateTrackAtVh(track, timelineCurrentVh);
+        const cam = cameraRef.current;
+        if (!cam) continue;
+        if (track.propertyId === "camera.fov") {
+          cam.fov = THREE.MathUtils.clamp(value, 10, 120);
+          cam.updateProjectionMatrix();
+        } else if (track.propertyId === "camera.dolly") {
+          if (!dollyCaptureRef.current && orbitControlsRef.current) {
+            dollyCaptureRef.current = {
+              direction: cam.position.clone().sub(orbitControlsRef.current.target).normalize(),
+              target: orbitControlsRef.current.target.clone(),
+            };
+          }
+          if (dollyCaptureRef.current && value > 0) {
+            const { direction, target } = dollyCaptureRef.current;
+            cam.position.copy(target).addScaledVector(direction, value);
+            orbitControlsRef.current?.update();
+          }
+        }
+        continue;
+      }
       const layer = layerItemsRef.current.find((l) => l.id === track.layerId);
       if (!layer) continue;
       const value = evaluateTrackAtVh(track, timelineCurrentVh);
@@ -1915,6 +2362,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const selectLayer = (layerId: string) => {
+    if (layerId === CAMERA_LAYER_ID) return;
     if (!layerObjectMapRef.current.get(layerId)) {
       setSelectedLayerId(null);
       return;
@@ -2022,9 +2470,13 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       if (ext === "glb" || ext === "gltf") {
         const loader = new GLTFLoader();
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath("/draco/gltf/");
+        loader.setDRACOLoader(dracoLoader);
         const gltf = await new Promise<{ scene: THREE.Object3D }>(
           (resolve, reject) => loader.parse(buffer, "", resolve, reject)
         );
+        dracoLoader.dispose();
         loadedScene = gltf.scene;
       } else if (ext === "fbx") {
         const { FBXLoader } = await import("three/examples/jsm/loaders/FBXLoader.js");
@@ -2048,9 +2500,17 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       // ── Apply scene (same logic for all formats) ──────────────────────────
       if (loadId !== loadIdRef.current) return;
+
+
+      // Apply env map directly to materials if PMREM texture already exists (fixes dark PBR models)
+      if (_pmremEnvRef.texture) {
+        applyEnvMapToScene(loadedScene, _pmremEnvRef.texture);
+      }
       setModelScene(loadedScene);
       posthog.capture("model_uploaded");
       rotationPivotRef.current.clear();
+      scalePivotRef.current.clear();
+      dollyCaptureRef.current = null;
       const { items, objectMap } = getLayerItems(loadedScene);
       setLayerItems(items);
       layerObjectMapRef.current = objectMap;
@@ -2071,6 +2531,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         if (cfg.pointLights?.length) setPointLights(cfg.pointLights);
         if (Array.isArray(cfg.animationTracks)) {
           const remapped = cfg.animationTracks.map((track) => {
+            if (track.layerId === CAMERA_LAYER_ID) return track;
             if (items.some((l) => l.id === track.layerId)) return track;
             if (track.layerName) {
               const match = items.find((l) => l.name === track.layerName);
@@ -2083,6 +2544,33 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         if (cfg.pinnedCameraView && typeof cfg.pinnedCameraView === "object") {
           setPinnedCameraView(cfg.pinnedCameraView);
           applyCameraView(cfg.pinnedCameraView);
+        }
+        // Restore base layer transforms (position/rotation/scale/opacity) that were
+        // set without keyframes — these aren't covered by animationTracks.
+        if (Array.isArray(cfg.layerTransforms)) {
+          let transformsApplied = false;
+          for (const lt of cfg.layerTransforms) {
+            const match = items.find((l) => l.name === lt.layerName);
+            const obj = match ? objectMap.get(match.id) : undefined;
+            if (!obj) continue;
+            obj.position.set(lt.position.x, lt.position.y, lt.position.z);
+            obj.rotation.set(
+              THREE.MathUtils.degToRad(lt.rotation.x),
+              THREE.MathUtils.degToRad(lt.rotation.y),
+              THREE.MathUtils.degToRad(lt.rotation.z),
+              obj.rotation.order
+            );
+            obj.scale.set(lt.scale, lt.scale, lt.scale);
+            setObjectOpacity(obj, lt.opacity);
+            obj.updateMatrixWorld(true);
+            transformsApplied = true;
+          }
+          if (transformsApplied) {
+            // Rebuild layerItems so modifier labels reflect the restored state
+            const { items: updatedItems } = getLayerItems(loadedScene);
+            setLayerItems(updatedItems);
+            layerItemsRef.current = updatedItems;
+          }
         }
       }
       if (!projectOpenOptions) setPinnedCameraView(null);
@@ -2141,9 +2629,19 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             const userId = user?.id;
             if (!userId) throw new Error("Not authenticated");
             const pathname = `models/${userId}/${Date.now()}-${file.name}`;
+
+            // Browsers often leave file.type empty for STL/FBX/OBJ — force a known type
+            const extMime: Record<string, string> = {
+              glb: "model/gltf-binary", gltf: "model/gltf+json",
+              fbx: "application/x-fbx", obj: "text/plain",
+              stl: "application/octet-stream",
+            };
+            const uploadContentType = file.type || extMime[ext] || "application/octet-stream";
+
             const blob = await upload(pathname, file, {
               access: "public",
               handleUploadUrl: "/api/upload",
+              contentType: uploadContentType,
             });
             await fetch(`/api/projects/${currentProjectId}`, {
               method: "PATCH",
@@ -2151,11 +2649,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               body: JSON.stringify({ modelBlobUrl: blob.url, modelFilename: file.name }),
             });
           } catch (err) {
-            const msg = err instanceof Error ? err.message : "";
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error("[upload] model upload failed:", msg);
             if (msg.toLowerCase().includes("storage limit") || msg.toLowerCase().includes("maximum size")) {
               setLayerMessage("Storage limit reached — delete a project to free space.");
             } else {
-              setLayerMessage("Model upload failed. Your work is local-only until you retry.");
+              setLayerMessage(`Model upload failed: ${msg}`);
             }
           } finally {
             setIsModelUploading(false);
@@ -2245,6 +2744,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       if (Array.isArray(parsed.animationTracks)) {
         const currentLayers = layerItemsRef.current;
         const remapped = (parsed.animationTracks as AnimationTrack[]).map((track) => {
+          if (track.layerId === CAMERA_LAYER_ID) return track;
           // If the UUID still exists in the scene, use as-is
           if (currentLayers.some((l) => l.id === track.layerId)) return track;
           // Otherwise try to match by saved layer name (handles re-upload with new UUIDs)
@@ -2255,6 +2755,26 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           return track;
         });
         setAnimationTracks(remapped);
+      }
+
+      // Restore base layer transforms (position/rotation/scale/opacity without keyframes)
+      if (Array.isArray(parsed.layerTransforms)) {
+        const currentLayers = layerItemsRef.current;
+        for (const lt of parsed.layerTransforms as LayerTransform[]) {
+          const match = currentLayers.find((l) => l.name === lt.layerName);
+          const obj = match ? layerObjectMapRef.current.get(match.id) : undefined;
+          if (!obj) continue;
+          obj.position.set(lt.position.x, lt.position.y, lt.position.z);
+          obj.rotation.set(
+            THREE.MathUtils.degToRad(lt.rotation.x),
+            THREE.MathUtils.degToRad(lt.rotation.y),
+            THREE.MathUtils.degToRad(lt.rotation.z),
+            obj.rotation.order
+          );
+          obj.scale.set(lt.scale, lt.scale, lt.scale);
+          setObjectOpacity(obj, lt.opacity);
+          obj.updateMatrixWorld(true);
+        }
       }
 
       setHasUnsavedChanges(true); scheduleAutosave();
@@ -2290,15 +2810,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     const thumbnailDataUrl = captureThumbnail();
     if (!thumbnailDataUrl) return;
     // Build config so pinnedCameraView (and any other unsaved changes) are persisted on close
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((track) => ({
-        ...track,
-        layerName: getLayerName(track.layerId),
-      }));
-    }
+    const payload = buildConfigPayload();
     try {
       await fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -2308,9 +2820,32 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     } catch { /* non-fatal */ }
   };
 
-  const saveToDb = async () => {
-    if (!currentProjectId) return;
-    setLayerMessage("Saving…");
+  // Collect current Three.js transforms for all layers so they survive reload.
+  const buildLayerTransforms = (): LayerTransform[] => {
+    const result: LayerTransform[] = [];
+    for (const layer of layerItemsRef.current) {
+      const obj = layerObjectMapRef.current.get(layer.id);
+      if (!obj) continue;
+      result.push({
+        layerName: layer.name,
+        position: {
+          x: Number(obj.position.x.toFixed(4)),
+          y: Number(obj.position.y.toFixed(4)),
+          z: Number(obj.position.z.toFixed(4)),
+        },
+        rotation: {
+          x: Number(THREE.MathUtils.radToDeg(obj.rotation.x).toFixed(2)),
+          y: Number(THREE.MathUtils.radToDeg(obj.rotation.y).toFixed(2)),
+          z: Number(THREE.MathUtils.radToDeg(obj.rotation.z).toFixed(2)),
+        },
+        scale: Number(obj.scale.x.toFixed(4)),
+        opacity: Number(getObjectOpacity(obj).toFixed(3)),
+      });
+    }
+    return result;
+  };
+
+  const buildConfigPayload = (): ConfigPayload => {
     const payload: ConfigPayload = { settings, pointLights };
     if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
     if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
@@ -2320,6 +2855,15 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         layerName: getLayerName(track.layerId),
       }));
     }
+    const transforms = buildLayerTransforms();
+    if (transforms.length > 0) payload.layerTransforms = transforms;
+    return payload;
+  };
+
+  const saveToDb = async () => {
+    if (!currentProjectId) return;
+    setLayerMessage("Saving…");
+    const payload = buildConfigPayload();
     const thumbnailDataUrl = captureThumbnail();
     await fetch(`/api/projects/${currentProjectId}`, {
       method: "PATCH",
@@ -2333,15 +2877,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   // Silent autosave — no thumbnail, no "Saving…" flash.
   const autoSaveConfigOnly = async () => {
     if (!currentProjectId || !hasUnsavedChangesRef.current || isModelUploadingRef.current) return;
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((track) => ({
-        ...track,
-        layerName: getLayerName(track.layerId),
-      }));
-    }
+    const payload = buildConfigPayload();
     try {
       await fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -2361,15 +2897,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   };
 
   const exportConfigToFile = () => {
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((track) => ({
-        ...track,
-        layerName: getLayerName(track.layerId),
-      }));
-    }
+    const payload = buildConfigPayload();
     const text = JSON.stringify(payload, null, 2);
     const blob = new Blob([text], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2640,12 +3168,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   // Auto-save project config (debounced 2s) whenever tracks or timeline length change
   useEffect(() => {
     if (!currentProjectId) return;
-    const payload: ConfigPayload = { settings, pointLights };
-    if (pinnedCameraView) payload.pinnedCameraView = pinnedCameraView;
-    if (timelineLengthVh !== 200) payload.timelineLengthVh = timelineLengthVh;
-    if (animationTracks.length > 0) {
-      payload.animationTracks = animationTracks.map((t) => ({ ...t, layerName: getLayerName(t.layerId) }));
-    }
+    const payload = buildConfigPayload();
     const timer = setTimeout(() => {
       void fetch(`/api/projects/${currentProjectId}`, {
         method: "PATCH",
@@ -3661,6 +4184,235 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     </div>
   );
 
+  const isFramed = hasModel && viewMode !== "preview";
+  const FRAMED_TOP = 36;
+  const HANDLE_W = 4;
+
+  // ── Panel drag-and-drop helpers ──────────────────────────────────────────
+  const handlePanelDrop = (targetPanel: "left" | "right", insertIdx: number) => {
+    const dragId = panelDragIdRef.current;
+    if (!dragId) return;
+    setPanelLayout((prev) => {
+      const next = { left: [...prev.left], right: [...prev.right] };
+      const fromPanel: "left" | "right" = next.left.includes(dragId) ? "left" : "right";
+      next[fromPanel] = next[fromPanel].filter((id) => id !== dragId);
+      let idx = insertIdx;
+      if (fromPanel === targetPanel) {
+        const origIdx = prev[targetPanel].indexOf(dragId);
+        if (origIdx < insertIdx) idx--;
+      }
+      next[targetPanel].splice(Math.max(0, idx), 0, dragId);
+      return next;
+    });
+    setDropIndicator(null);
+    panelDragIdRef.current = null;
+  };
+
+  const sectionOpenState: Record<SectionId, [boolean, (v: boolean) => void]> = {
+    history: [historyOpen, setHistoryOpen],
+    environment: [showEnv, setShowEnv],
+    navigation: [showNav, setShowNav],
+    lighting: [showLighting, setShowLighting],
+    pointLights: [showPointLights, setShowPointLights],
+    variables: [showVariables, setShowVariables],
+    aiAnimator: [aiAnimatorOpen, setAiAnimatorOpen],
+  };
+
+  const sectionMeta: Record<SectionId, { label: string; icon: React.ReactNode }> = {
+    history:      { label: "History",                 icon: <History    className="h-4 w-4 text-muted-foreground" /> },
+    environment:  { label: "Environment",             icon: <Globe2     className="h-4 w-4 text-muted-foreground" /> },
+    navigation:   { label: "Navigation",              icon: <Camera     className="h-4 w-4 text-muted-foreground" /> },
+    lighting:     { label: "Lighting",                icon: <Lightbulb  className="h-4 w-4 text-muted-foreground" /> },
+    pointLights:  { label: "Additional Light Sources",icon: <Plus       className="h-4 w-4 text-muted-foreground" /> },
+    variables:    { label: "Variables",               icon: <Code2      className="h-4 w-4 text-muted-foreground" /> },
+    aiAnimator:   { label: "AI Animator",             icon: <Sparkles   className="h-4 w-4 text-muted-foreground" /> },
+  };
+
+  const renderSectionBody = (id: SectionId): React.ReactNode => {
+    switch (id) {
+      case "history":
+        return historyOpen ? <div className="px-3 pb-3 pt-1">{historyPanel}</div> : null;
+      case "environment":
+        return showEnv ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <ColorField label="Background color" value={settings.backgroundColor} onChange={(v) => patchSettings({ backgroundColor: v })} />
+            <ToggleField label="Show grid" checked={settings.showGrid} onChange={(v) => patchSettings({ showGrid: v })} />
+          </div>
+        ) : null;
+      case "navigation":
+        return showNav ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <ToggleField label="Enable zoom" checked={settings.orbitEnableZoom} onChange={(v) => patchSettings({ orbitEnableZoom: v })} />
+            <ToggleField label="Auto rotate" checked={settings.orbitAutoRotate} onChange={(v) => patchSettings({ orbitAutoRotate: v })} />
+          </div>
+        ) : null;
+      case "lighting":
+        return showLighting ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <ToggleField label="Environment map" checked={settings.useEnvironmentMap} onChange={(v) => patchSettings({ useEnvironmentMap: v })} />
+            {settings.useEnvironmentMap && (
+              <>
+                <div className="flex items-center justify-between">
+                  <Label>Preset</Label>
+                  <select value={settings.environmentPreset} onChange={(e) => patchSettings({ environmentPreset: e.target.value })} className="rounded border border-input bg-background px-2 py-1 text-xs">
+                    {ENV_PRESETS.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+                <SliderField label="Env intensity" value={settings.environmentIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ environmentIntensity: v })} />
+              </>
+            )}
+            <SliderField label="Exposure" value={settings.toneMappingExposure} min={0.1} max={5} step={0.05} onChange={(v) => patchSettings({ toneMappingExposure: v })} />
+            <ToggleField label="Ambient enabled" checked={settings.useAmbientLight} onChange={(v) => patchSettings({ useAmbientLight: v })} />
+            <SliderField label="Ambient intensity" value={settings.ambientIntensity} min={0} max={3} step={0.05} onChange={(v) => patchSettings({ ambientIntensity: v })} />
+            <ToggleField label="Directional enabled" checked={settings.useDirectionalLight} onChange={(v) => patchSettings({ useDirectionalLight: v })} />
+            <SliderField label="Directional intensity" value={settings.directionalIntensity} min={0} max={5} step={0.05} onChange={(v) => patchSettings({ directionalIntensity: v })} />
+            <SliderField label="Directional X" value={settings.directionalX} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalX: v })} />
+            <SliderField label="Directional Y" value={settings.directionalY} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalY: v })} />
+            <SliderField label="Directional Z" value={settings.directionalZ} min={-30} max={30} step={0.5} onChange={(v) => patchSettings({ directionalZ: v })} />
+          </div>
+        ) : null;
+      case "pointLights":
+        return showPointLights ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <Button size="sm" variant="secondary" className="w-full" onClick={addPointLight} disabled={pointLights.length >= MAX_POINT_LIGHTS}>
+              <Plus className="mr-2 h-4 w-4" />Add light
+            </Button>
+            {pointLights.map((light, index) => (
+              <div key={light.id} className="rounded-md border border-border/60 p-2 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium">Point Light {index + 1}</span>
+                  <div className="flex items-center gap-2">
+                    <Switch checked={light.enabled} onCheckedChange={(v) => updatePointLight(light.id, { enabled: v })} />
+                    <Button size="sm" variant="secondary" onClick={() => removePointLight(light.id)} disabled={pointLights.length === 1}><Trash2 className="h-4 w-4" /></Button>
+                  </div>
+                </div>
+                <ColorField label="Color" value={light.color} onChange={(v) => updatePointLight(light.id, { color: v })} />
+                <SliderField label="Intensity" value={light.intensity} min={0} max={20} step={0.05} onChange={(v) => updatePointLight(light.id, { intensity: v })} />
+                <SliderField label="Distance" value={light.distance} min={0} max={500} step={1} onChange={(v) => updatePointLight(light.id, { distance: v })} />
+                <p className="text-xs text-muted-foreground">Distance 0 = no cutoff.</p>
+                <SliderField label="Decay" value={light.decay} min={0} max={4} step={0.1} onChange={(v) => updatePointLight(light.id, { decay: v })} />
+                <SliderField label="X" value={light.x} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { x: v })} />
+                <SliderField label="Y" value={light.y} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { y: v })} />
+                <SliderField label="Z" value={light.z} min={-100} max={100} step={0.5} onChange={(v) => updatePointLight(light.id, { z: v })} />
+              </div>
+            ))}
+          </div>
+        ) : null;
+      case "variables":
+        return showVariables ? (
+          <div className="space-y-3 px-3 pb-3 pt-1">
+            <div className="rounded-md border bg-slate-50 p-2 shadow-inner dark:bg-zinc-950">
+              <div className="mb-2 flex justify-end">
+                <Button size="sm" variant="outline" onClick={formatConfig}><Code2 className="mr-2 h-4 w-4" />Format JSON</Button>
+              </div>
+              <Textarea value={configText} onChange={(e) => { setConfigText(e.target.value); setConfigDirty(true); setHasUnsavedChanges(true); scheduleAutosave(); setConfigMessage(null); }} rows={16} className="font-mono shadow-inner" />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={copyConfig}><Clipboard className="mr-2 h-4 w-4" />Copy</Button>
+              <Button size="sm" variant="outline" onClick={saveConfigLocal}><Save className="mr-2 h-4 w-4" />Save Local</Button>
+              <Button size="sm" variant="outline" onClick={loadConfigLocal}><Download className="mr-2 h-4 w-4" />Load Local</Button>
+              <Button size="sm" onClick={applyConfigFromText}><Check className="mr-2 h-4 w-4" />Apply</Button>
+            </div>
+            {configMessage ? (
+              <p className={cn("inline-flex items-center gap-1.5 text-xs", configStatusTone === "error" ? "text-red-500" : "text-muted-foreground")}>
+                <Circle className={cn("h-2.5 w-2.5", configStatusTone === "success" ? "fill-green-500 text-green-500" : "fill-red-500 text-red-500")} />
+                {configMessage}
+              </p>
+            ) : null}
+          </div>
+        ) : null;
+      case "aiAnimator":
+        return aiAnimatorOpen ? (
+          <div className="flex flex-col gap-2 px-3 pb-3 pt-1">
+            <AiChatPanel
+              layerItems={layerItems}
+              animationTracks={animationTracks}
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              setAnimationTracks={setTracksWithHistory as unknown as (t: any[]) => void}
+              timelineLengthVh={timelineLengthVh}
+              setTimelineLengthVh={(vh) => { setTimelineLengthVh(vh); setHasUnsavedChanges(true); scheduleAutosave(); }}
+              settings={settings}
+              patchSettings={patchSettings}
+              pointLights={pointLights}
+              setPointLights={(lights) => { setPointLights(lights); setHasUnsavedChanges(true); scheduleAutosave(); }}
+              projectId={currentProjectId}
+              addLog={addLog}
+              onOperationsApplied={fitModelToCamera}
+              onExplodedView={(centroid, maxOffset) => {
+                const camera = cameraRef.current;
+                const controls = orbitControlsRef.current;
+                if (!camera || !controls) return;
+                const fovRad = THREE.MathUtils.degToRad(camera.fov);
+                const distance = (maxOffset / Math.tan(fovRad / 2)) * 2.0;
+                const direction = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+                camera.position.set(centroid.x, centroid.y, centroid.z).addScaledVector(direction, distance);
+                controls.target.set(centroid.x, centroid.y, centroid.z);
+                controls.update();
+                setPinnedCameraView({
+                  position: [camera.position.x, camera.position.y, camera.position.z],
+                  target: [controls.target.x, controls.target.y, controls.target.z],
+                  fov: camera.fov,
+                  zoom: camera.zoom,
+                });
+                setHasUnsavedChanges(true); scheduleAutosave();
+              }}
+            />
+          </div>
+        ) : null;
+      default:
+        return null;
+    }
+  };
+
+  const renderPanel = (side: "left" | "right"): React.ReactNode => {
+    const ids = panelLayout[side];
+    return (
+      <div>
+        {ids.filter((id) => !hiddenSections.has(id)).map((id, idx) => {
+          const meta = sectionMeta[id];
+          const [open, setOpen] = sectionOpenState[id];
+          const isDragging = panelDragIdRef.current === id;
+          const showIndicatorAbove = dropIndicator?.panel === side && dropIndicator.idx === idx;
+          return (
+            <div
+              key={id}
+              draggable
+              onDragStart={(e) => { e.stopPropagation(); panelDragIdRef.current = id; e.dataTransfer.effectAllowed = "move"; }}
+              onDragEnd={() => { panelDragIdRef.current = null; setDropIndicator(null); }}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDropIndicator({ panel: side, idx }); }}
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handlePanelDrop(side, idx); }}
+              className={cn("border-b border-border/50 group/section", isDragging && "opacity-30")}
+            >
+              {showIndicatorAbove && <div className="h-0.5 bg-primary" />}
+              <button
+                type="button"
+                className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium hover:bg-muted/50 transition-colors"
+                onClick={() => setOpen(!open)}
+              >
+                <span className="flex items-center gap-2">{meta.icon}{meta.label}</span>
+                <span className="flex items-center gap-1">
+                  <GripVertical className="h-3.5 w-3.5 text-muted-foreground/0 group-hover/section:text-muted-foreground/50 transition-colors cursor-grab" onPointerDown={(e) => e.stopPropagation()} />
+                  {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+                </span>
+              </button>
+              {renderSectionBody(id)}
+            </div>
+          );
+        })}
+        {/* Drop zone at the end of the panel */}
+        <div
+          className="min-h-4 flex-1"
+          onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDropIndicator({ panel: side, idx: ids.length }); }}
+          onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handlePanelDrop(side, ids.length); }}
+        >
+          {dropIndicator?.panel === side && dropIndicator.idx === ids.length && (
+            <div className="h-0.5 bg-primary mx-0" />
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div
       ref={viewerRef}
@@ -3675,7 +4427,10 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       onDragLeave={() => setIsDragging(false)}
       onDrop={onDrop}
     >
-      <div className="absolute inset-0">
+      <div
+        className="absolute"
+        style={{ top: FRAMED_TOP, left: leftPanelWidth + HANDLE_W, right: rightPanelWidth + HANDLE_W, bottom: timelineActualHeight }}
+      >
         {hasModel ? (
           <>
           <Canvas gl={{ preserveDrawingBuffer: true }} onPointerMissed={viewMode === "animate" ? handleCanvasPointerMissed : undefined}>
@@ -3688,7 +4443,23 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               far={100000}
             />
             <color attach="background" args={[settings.backgroundColor]} />
+            <RendererConfig exposure={settings.toneMappingExposure} />
 
+            {/* NeutralEnvironment always runs as base IBL — instant, no CDN.
+                CDN preset (if chosen) overrides scene.environment once loaded. */}
+            {settings.useEnvironmentMap && (
+              <NeutralEnvironment intensity={settings.environmentIntensity} />
+            )}
+            {settings.useEnvironmentMap && settings.environmentPreset !== "neutral" && (
+              <Environment
+                preset={settings.environmentPreset as Exclude<EnvPreset, "neutral">}
+                background={false}
+                environmentIntensity={settings.environmentIntensity}
+              />
+            )}
+            {/* Hemisphere fill — ensures no model ever goes fully black regardless of material type.
+                intensity=3 in physical lux is ~indoor ambient; just enough to reveal dark-colored models. */}
+            <hemisphereLight args={["#ffffff", "#444444", 3]} />
             {settings.useAmbientLight ? <ambientLight intensity={settings.ambientIntensity} /> : null}
             {settings.useDirectionalLight ? (
               <directionalLight
@@ -3833,7 +4604,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       {/* ── Floating menu buttons — only after a model is loaded, not in preview ─── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className="absolute left-4 top-3 z-[60] flex items-center gap-0.5 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          className="absolute left-4 top-0 h-9 z-[60] flex items-center gap-0.5 px-1 py-0"
           onPointerDown={(e) => e.stopPropagation()}
         >
           <button
@@ -3886,145 +4657,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
               )}
             </>
           )}
-
-          <div className="mx-0.5 h-4 w-px bg-border/60" />
-          {/* File menu */}
-          <div className="relative">
-            <button
-              type="button"
-              className={cn(
-                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
-                fileMenuOpen && "bg-muted/80"
-              )}
-              onPointerDown={(e) => { e.stopPropagation(); setFileMenuOpen((v) => !v); setEditMenuOpen(false); }}
-            >
-              File <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-            </button>
-            {fileMenuOpen && (
-              <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg">
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel}
-                  onClick={() => { setFileMenuOpen(false); exportCurrentModel(); }}
-                >
-                  <Download className="mr-2 h-4 w-4" />
-                  Export Model
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel || animationTracks.length === 0}
-                  onClick={() => { setFileMenuOpen(false); exportHtmlAnimation(); }}
-                >
-                  <Code2 className="mr-2 h-4 w-4" />
-                  Export HTML Page
-                </button>
-                <div className="my-1 border-t border-border" />
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!currentProjectId || isModelUploading}
-                  onClick={() => { setFileMenuOpen(false); void saveToDb(); }}
-                >
-                  <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save</span>
-                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl S</kbd>
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel}
-                  onClick={() => { setFileMenuOpen(false); exportConfigToFile(); }}
-                >
-                  <Download className="mr-2 h-4 w-4" />
-                  Download Config…
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); guardUnsaved(loadFromFile); }}
-                >
-                  <FolderOpen className="mr-2 h-4 w-4" />
-                  Load Config…
-                </button>
-                <div className="my-1 border-t border-border" />
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); setSkillsOpen(true); }}
-                >
-                  <Sparkles className="mr-2 h-4 w-4" />
-                  Animation Skills…
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); setLogsOpen(true); }}
-                >
-                  <Clock3 className="mr-2 h-4 w-4" />
-                  Logs
-                </button>
-                <div className="my-1 border-t border-border" />
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => {
-                    setFileMenuOpen(false);
-                    if (isModelUploading) { setUploadWarningOpen(true); return; }
-                    navigateToProjects();
-                  }}
-                >
-                  <X className="mr-2 h-4 w-4" />
-                  Close Project
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Edit menu */}
-          <div className="relative">
-            <button
-              type="button"
-              className={cn(
-                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
-                editMenuOpen && "bg-muted/80"
-              )}
-              onPointerDown={(e) => { e.stopPropagation(); setEditMenuOpen((v) => !v); setFileMenuOpen(false); }}
-            >
-              Edit <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-            </button>
-            {editMenuOpen && (
-              <div className="absolute left-0 top-full z-50 mt-1 w-48 rounded-md border border-border bg-card p-1 shadow-lg">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={undoCount === 0}
-                  onClick={() => { setEditMenuOpen(false); undoLayerChange(); }}
-                >
-                  <span className="flex items-center gap-2"><Undo2 className="h-4 w-4" /> Undo</span>
-                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl Z</kbd>
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={undoCount === 0}
-                  onClick={() => { setEditMenuOpen(false); resetLayerChanges(); }}
-                >
-                  <RotateCcw className="mr-2 h-4 w-4" />
-                  Reset All
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={redoCount === 0}
-                  onClick={() => { setEditMenuOpen(false); redoLayerChange(); }}
-                >
-                  <span className="flex items-center gap-2"><Redo2 className="h-4 w-4" /> Redo</span>
-                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl Shift Z</kbd>
-                </button>
-              </div>
-            )}
-          </div>
 
           {viewMode === "animate" && selectedLayerId ? (
             <>
@@ -4107,25 +4739,133 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
         <div className="absolute inset-0 z-40 flex items-center justify-center p-4">{uploadPanel}</div>
       ) : null}
 
+      {/* ── Framed View chrome: top bar bg + panel resize handles ──── */}
+      {isFramed && (
+        <>
+          <div className="pointer-events-none absolute left-0 right-0 top-0 z-[59] border-b border-border bg-[#0d1117]" style={{ height: FRAMED_TOP }} />
+          <div
+            className="absolute z-[55] transition-colors hover:bg-primary/30 active:bg-primary/60"
+            style={{ top: FRAMED_TOP, left: leftPanelWidth, width: HANDLE_W, bottom: timelineActualHeight, cursor: "ew-resize" }}
+            onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); leftPanelResizeDragRef.current = { startX: e.clientX, startWidth: leftPanelWidth }; }}
+          />
+          <div
+            className="absolute z-[55] transition-colors hover:bg-primary/30 active:bg-primary/60"
+            style={{ top: FRAMED_TOP, right: rightPanelWidth, width: HANDLE_W, bottom: timelineActualHeight, cursor: "ew-resize" }}
+            onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); rightPanelResizeDragRef.current = { startX: e.clientX, startWidth: rightPanelWidth }; }}
+          />
+        </>
+      )}
+
+
       {hasModel && viewMode === "animate" ? (
-        <aside className="absolute left-4 top-16 z-50 w-fit space-y-2">
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
+        <aside
+          className="absolute z-50 overflow-y-auto border-r border-border bg-[#0d1117]"
+          style={{ top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" }}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("left", panelLayout.left.length); }}
+        >
+          {/* ── File / Edit / View menus — sticky top of left sidebar ─── */}
+          <div className="sticky top-0 z-10 flex items-center gap-0.5 border-b border-border bg-[#0d1117] px-1 py-1">
+            {/* File menu */}
+            <div className="relative">
+              <button
                 type="button"
-                variant="secondary"
-                className="w-full min-w-[160px] justify-between"
-                onClick={() => setHistoryOpen((prev) => !prev)}
+                className={cn("flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors", fileMenuOpen && "bg-muted/80")}
+                onPointerDown={(e) => { e.stopPropagation(); setFileMenuOpen((v) => !v); setEditMenuOpen(false); setViewMenuOpen(false); }}
               >
-                <span className="inline-flex items-center gap-2">
-                  <History className="h-4 w-4" />
-                  History
-                </span>
-                {historyOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {historyOpen ? <CardContent className="pt-0">{historyPanel}</CardContent> : null}
-          </Card>
+                File <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+              {fileMenuOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!hasModel} onClick={() => { setFileMenuOpen(false); exportCurrentModel(); }}>
+                    <Download className="mr-2 h-4 w-4" />Export Model
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!hasModel || animationTracks.length === 0} onClick={() => { setFileMenuOpen(false); exportHtmlAnimation(); }}>
+                    <Code2 className="mr-2 h-4 w-4" />Export HTML Page
+                  </button>
+                  <div className="my-1 border-t border-border" />
+                  <button type="button" className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!currentProjectId || isModelUploading} onClick={() => { setFileMenuOpen(false); void saveToDb(); }}>
+                    <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save</span>
+                    <kbd className="font-sans text-xs text-muted-foreground">Ctrl S</kbd>
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!hasModel} onClick={() => { setFileMenuOpen(false); exportConfigToFile(); }}>
+                    <Download className="mr-2 h-4 w-4" />Download Config…
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); guardUnsaved(loadFromFile); }}>
+                    <FolderOpen className="mr-2 h-4 w-4" />Load Config…
+                  </button>
+                  <div className="my-1 border-t border-border" />
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); setAiSettingsOpen(true); }}>
+                    <Sparkles className="mr-2 h-4 w-4 text-primary" />AI Settings…
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); setSkillsOpen(true); }}>
+                    <Sparkles className="mr-2 h-4 w-4" />Animation Skills…
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); setLogsOpen(true); }}>
+                    <Clock3 className="mr-2 h-4 w-4" />Logs
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); if (!helpMd) fetch("/help.md").then((r) => r.text()).then(setHelpMd); setHelpOpen(true); }}>
+                    <HelpCircle className="mr-2 h-4 w-4" />Help
+                  </button>
+                  <div className="my-1 border-t border-border" />
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); if (isModelUploading) { setUploadWarningOpen(true); return; } navigateToProjects(); }}>
+                    <X className="mr-2 h-4 w-4" />Close Project
+                  </button>
+                </div>
+              )}
+            </div>
+            {/* Edit menu */}
+            <div className="relative">
+              <button
+                type="button"
+                className={cn("flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors", editMenuOpen && "bg-muted/80")}
+                onPointerDown={(e) => { e.stopPropagation(); setEditMenuOpen((v) => !v); setFileMenuOpen(false); setViewMenuOpen(false); }}
+              >
+                Edit <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+              {editMenuOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 w-48 rounded-md border border-border bg-card p-1 shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+                  <button type="button" className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={undoCount === 0} onClick={() => { setEditMenuOpen(false); undoLayerChange(); }}>
+                    <span className="flex items-center gap-2"><Undo2 className="h-4 w-4" /> Undo</span>
+                    <kbd className="font-sans text-xs text-muted-foreground">Ctrl Z</kbd>
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={undoCount === 0} onClick={() => { setEditMenuOpen(false); resetLayerChanges(); }}>
+                    <RotateCcw className="mr-2 h-4 w-4" />Reset All
+                  </button>
+                  <button type="button" className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={redoCount === 0} onClick={() => { setEditMenuOpen(false); redoLayerChange(); }}>
+                    <span className="flex items-center gap-2"><Redo2 className="h-4 w-4" /> Redo</span>
+                    <kbd className="font-sans text-xs text-muted-foreground">Ctrl Shift Z</kbd>
+                  </button>
+                </div>
+              )}
+            </div>
+            {/* View menu */}
+            <div className="relative">
+              <button
+                type="button"
+                className={cn("flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors", viewMenuOpen && "bg-muted/80")}
+                onPointerDown={(e) => { e.stopPropagation(); setViewMenuOpen((v) => !v); setFileMenuOpen(false); setEditMenuOpen(false); }}
+              >
+                View <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+              {viewMenuOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+                  {(Object.keys(sectionMeta) as SectionId[]).map((id) => {
+                    const { label, icon } = sectionMeta[id];
+                    const visible = !hiddenSections.has(id);
+                    return (
+                      <button key={id} type="button" className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => setHiddenSections((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; })}>
+                        <span className="flex h-4 w-4 items-center justify-center">{visible ? <Check className="h-3.5 w-3.5" /> : null}</span>
+                        {icon}{label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {renderPanel("left")}
         </aside>
       ) : null}
 
@@ -4142,62 +4882,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       {/* ── Navigate / Animate / Preview mode toggle — top-right ─────────── */}
       {hasModel && viewMode !== "preview" ? (
         <div
-          className="absolute right-4 top-3 z-[60] flex items-center gap-1 rounded-lg border border-border/40 bg-card/90 px-1 py-0.5 backdrop-blur-sm"
+          className="absolute right-4 top-0 h-9 z-[60] flex items-center gap-1 px-1 py-0"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          {viewMode === "animate" && modelScene ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-              title="Fit camera to model and save as preview camera"
-              onClick={fitModelToCamera}
-            >
-              <Maximize2 className="h-3.5 w-3.5" />
-            </Button>
-          ) : null}
-          {viewMode === "animate" ? (
-            <Button
-              size="sm"
-              variant={pinnedCameraView ? "outline" : "secondary"}
-              className={cn(
-                "h-7",
-                pinnedCameraView
-                  ? "border-primary/50 text-primary hover:bg-primary/10"
-                  : "text-muted-foreground"
-              )}
-              title={pinnedCameraView ? "Update saved preview camera" : "Save current view as preview camera"}
-              onClick={() => {
-                const controls = orbitControlsRef.current;
-                const camera = cameraRef.current;
-                if (!controls || !camera) return;
-                setPinnedCameraView({
-                  position: [camera.position.x, camera.position.y, camera.position.z],
-                  target: [controls.target.x, controls.target.y, controls.target.z],
-                  fov: camera.fov,
-                  zoom: camera.zoom,
-                });
-                setHasUnsavedChanges(true); scheduleAutosave();
-              }}
-            >
-              <Camera className="mr-1.5 h-3.5 w-3.5" />
-              Set Preview Camera
-            </Button>
-          ) : null}
-          {viewMode === "animate" && pinnedCameraView ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 w-7 p-0 text-primary hover:bg-primary/10"
-              title="Return to saved preview angle"
-              onClick={() => applyCameraView(pinnedCameraView)}
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-            </Button>
-          ) : null}
-          {viewMode === "animate" ? (
-            <div className="mx-0.5 h-4 w-px bg-border/60" />
-          ) : null}
           <Button
             size="sm"
             className="h-7"
@@ -4328,340 +5015,93 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       ) : null}
 
       {hasModel && viewMode !== "preview" ? (
-        <aside className="absolute right-4 top-16 z-50 w-fit space-y-2">
-
-          <Card className="bg-card/95 backdrop-blur">
-            <CardHeader className="py-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full min-w-[160px] justify-between"
-                onClick={() => setShowCustomize((prev) => !prev)}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Settings2 className="h-4 w-4" />
-                  Customize
-                </span>
-                {showCustomize ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </Button>
-            </CardHeader>
-            {showCustomize ? (
-              <CardContent className="max-h-[calc(100vh-7rem)] space-y-6 overflow-y-auto pt-0">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Globe2 className="h-5 w-5" />
-                  Environment
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <ColorField
-                  label="Background color"
-                  value={settings.backgroundColor}
-                  onChange={(value) => patchSettings({ backgroundColor: value })}
-                />
-                <ToggleField
-                  label="Show grid"
-                  checked={settings.showGrid}
-                  onChange={(v) => patchSettings({ showGrid: v })}
-                />
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Camera className="h-5 w-5" />
-                  Navigation
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <ToggleField
-                  label="Enable zoom"
-                  checked={settings.orbitEnableZoom}
-                  onChange={(v) => patchSettings({ orbitEnableZoom: v })}
-                />
-                <ToggleField
-                  label="Auto rotate"
-                  checked={settings.orbitAutoRotate}
-                  onChange={(v) => patchSettings({ orbitAutoRotate: v })}
-                />
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex-row items-center justify-between space-y-0">
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Lightbulb className="h-5 w-5" />
-                  Lighting
-                </CardTitle>
-                <Button size="sm" variant="secondary" onClick={addPointLight} disabled={pointLights.length >= MAX_POINT_LIGHTS}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add light
+        <aside
+          className="absolute z-50 overflow-y-auto border-l border-border bg-[#0d1117]"
+          style={{ top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" }}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("right", panelLayout.right.length); }}
+        >
+          {/* ── Camera controls — sticky top of right sidebar ─── */}
+          {viewMode === "animate" && (
+            <div className="sticky top-0 z-10 flex items-center gap-1 border-b border-border bg-[#0d1117] px-2 py-1.5">
+              {modelScene ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                  title="Fit camera to model"
+                  onClick={fitModelToCamera}
+                >
+                  <Maximize2 className="h-3.5 w-3.5" />
                 </Button>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <ToggleField
-                  label="Ambient enabled"
-                  checked={settings.useAmbientLight}
-                  onChange={(v) => patchSettings({ useAmbientLight: v })}
-                />
-                <SliderField
-                  label="Ambient intensity"
-                  value={settings.ambientIntensity}
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  onChange={(v) => patchSettings({ ambientIntensity: v })}
-                />
-                <ToggleField
-                  label="Directional enabled"
-                  checked={settings.useDirectionalLight}
-                  onChange={(v) => patchSettings({ useDirectionalLight: v })}
-                />
-                <SliderField
-                  label="Directional intensity"
-                  value={settings.directionalIntensity}
-                  min={0}
-                  max={5}
-                  step={0.05}
-                  onChange={(v) => patchSettings({ directionalIntensity: v })}
-                />
-                <SliderField
-                  label="Directional X"
-                  value={settings.directionalX}
-                  min={-30}
-                  max={30}
-                  step={0.5}
-                  onChange={(v) => patchSettings({ directionalX: v })}
-                />
-                <SliderField
-                  label="Directional Y"
-                  value={settings.directionalY}
-                  min={-30}
-                  max={30}
-                  step={0.5}
-                  onChange={(v) => patchSettings({ directionalY: v })}
-                />
-                <SliderField
-                  label="Directional Z"
-                  value={settings.directionalZ}
-                  min={-30}
-                  max={30}
-                  step={0.5}
-                  onChange={(v) => patchSettings({ directionalZ: v })}
-                />
+              ) : null}
+              <Button
+                size="sm"
+                variant={pinnedCameraView ? "outline" : "secondary"}
+                className={cn(
+                  "h-7 flex-1 text-xs",
+                  pinnedCameraView
+                    ? "border-primary/50 text-primary hover:bg-primary/10"
+                    : "text-muted-foreground"
+                )}
+                title={pinnedCameraView ? "Update saved preview camera" : "Save current view as preview camera"}
+                onClick={() => {
+                  const controls = orbitControlsRef.current;
+                  const camera = cameraRef.current;
+                  if (!controls || !camera) return;
+                  setPinnedCameraView({
+                    position: [camera.position.x, camera.position.y, camera.position.z],
+                    target: [controls.target.x, controls.target.y, controls.target.z],
+                    fov: camera.fov,
+                    zoom: camera.zoom,
+                  });
+                  setHasUnsavedChanges(true); scheduleAutosave();
+                }}
+              >
+                <Camera className="mr-1.5 h-3.5 w-3.5" />
+                Set Preview Camera
+              </Button>
+              {pinnedCameraView ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0 text-primary hover:bg-primary/10"
+                  title="Return to saved preview angle"
+                  onClick={() => applyCameraView(pinnedCameraView)}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </Button>
+              ) : null}
+            </div>
+          )}
 
-                {pointLights.map((light, index) => (
-                  <Card key={light.id} className="border-border/80">
-                    <CardHeader className="flex-row items-center justify-between space-y-0">
-                      <CardTitle>Point Light {index + 1}</CardTitle>
-                      <div className="flex items-center gap-2">
-                        <Switch
-                          checked={light.enabled}
-                          onCheckedChange={(v) => updatePointLight(light.id, { enabled: v })}
-                        />
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => removePointLight(light.id)}
-                          disabled={pointLights.length === 1}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <ColorField
-                        label="Color"
-                        value={light.color}
-                        onChange={(value) => updatePointLight(light.id, { color: value })}
-                      />
-                      <SliderField
-                        label="Intensity"
-                        value={light.intensity}
-                        min={0}
-                        max={20}
-                        step={0.05}
-                        onChange={(v) => updatePointLight(light.id, { intensity: v })}
-                      />
-                      <SliderField
-                        label="Distance"
-                        value={light.distance}
-                        min={0}
-                        max={500}
-                        step={1}
-                        onChange={(v) => updatePointLight(light.id, { distance: v })}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Distance 0 means no cutoff (infinite).
-                      </p>
-                      <SliderField
-                        label="Decay"
-                        value={light.decay}
-                        min={0}
-                        max={4}
-                        step={0.1}
-                        onChange={(v) => updatePointLight(light.id, { decay: v })}
-                      />
-                      <SliderField
-                        label="X"
-                        value={light.x}
-                        min={-100}
-                        max={100}
-                        step={0.5}
-                        onChange={(v) => updatePointLight(light.id, { x: v })}
-                      />
-                      <SliderField
-                        label="Y"
-                        value={light.y}
-                        min={-100}
-                        max={100}
-                        step={0.5}
-                        onChange={(v) => updatePointLight(light.id, { y: v })}
-                      />
-                      <SliderField
-                        label="Z"
-                        value={light.z}
-                        min={-100}
-                        max={100}
-                        step={0.5}
-                        onChange={(v) => updatePointLight(light.id, { z: v })}
-                      />
-                    </CardContent>
-                  </Card>
-                ))}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg font-bold">
-                  <Code2 className="h-5 w-5" />
-                  Variables (Editable JSON)
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="rounded-md border bg-slate-50 p-2 shadow-inner dark:bg-zinc-950">
-                  <div className="mb-2 flex justify-end">
-                    <Button size="sm" variant="outline" onClick={formatConfig}>
-                      <Code2 className="mr-2 h-4 w-4" />
-                      Format JSON
-                    </Button>
-                  </div>
-                  <Textarea
-                    value={configText}
-                    onChange={(e) => {
-                      setConfigText(e.target.value);
-                      setConfigDirty(true);
-                      setHasUnsavedChanges(true); scheduleAutosave();
-                      setConfigMessage(null);
-                    }}
-                    rows={16}
-                    className="font-mono shadow-inner"
-                  />
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" onClick={copyConfig}>
-                    <Clipboard className="mr-2 h-4 w-4" />
-                    Copy
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={saveConfigLocal}>
-                    <Save className="mr-2 h-4 w-4" />
-                    Save Local
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={loadConfigLocal}>
-                    <Download className="mr-2 h-4 w-4" />
-                    Load Local
-                  </Button>
-                  <Button size="sm" onClick={applyConfigFromText}>
-                    <Check className="mr-2 h-4 w-4" />
-                    Apply
-                  </Button>
-                </div>
-              </CardContent>
-              <CardFooter className="justify-end">
-                {configMessage ? (
-                  <p
-                    className={cn(
-                      "inline-flex items-center gap-1.5 text-xs text-muted-foreground",
-                      configStatusTone === "error" ? "text-red-500" : "text-muted-foreground"
-                    )}
-                  >
-                    <Circle
-                      className={cn(
-                        "h-2.5 w-2.5",
-                        configStatusTone === "success" ? "fill-green-500 text-green-500" : "fill-red-500 text-red-500"
-                      )}
-                    />
-                    {configMessage}
-                  </p>
-                ) : null}
-              </CardFooter>
-            </Card>
-              </CardContent>
-            ) : null}
-          </Card>
-
-          <AiChatPanel
-            layerItems={layerItems}
-            animationTracks={animationTracks}
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            setAnimationTracks={setTracksWithHistory as unknown as (t: any[]) => void}
-            timelineLengthVh={timelineLengthVh}
-            setTimelineLengthVh={(vh) => { setTimelineLengthVh(vh); setHasUnsavedChanges(true); scheduleAutosave(); }}
-            settings={settings}
-            patchSettings={patchSettings}
-            pointLights={pointLights}
-            setPointLights={(lights) => { setPointLights(lights); setHasUnsavedChanges(true); scheduleAutosave(); }}
-            projectId={currentProjectId}
-            addLog={addLog}
-            onOperationsApplied={fitModelToCamera}
-            onExplodedView={(centroid, maxOffset) => {
-              const camera = cameraRef.current;
-              const controls = orbitControlsRef.current;
-              if (!camera || !controls) return;
-              // Fit camera to the expected exploded radius (centroid + maxOffset in all directions)
-              const fovRad = THREE.MathUtils.degToRad(camera.fov);
-              const distance = (maxOffset / Math.tan(fovRad / 2)) * 2.0;
-              const direction = new THREE.Vector3()
-                .subVectors(camera.position, controls.target)
-                .normalize();
-              camera.position.set(centroid.x, centroid.y, centroid.z).addScaledVector(direction, distance);
-              controls.target.set(centroid.x, centroid.y, centroid.z);
-              controls.update();
-              setPinnedCameraView({
-                position: [camera.position.x, camera.position.y, camera.position.z],
-                target: [controls.target.x, controls.target.y, controls.target.z],
-                fov: camera.fov,
-                zoom: camera.zoom,
-              });
-              setHasUnsavedChanges(true); scheduleAutosave();
-            }}
-          />
+          {renderPanel("right")}
         </aside>
       ) : null}
 
       {hasModel && viewMode === "animate" ? (
-        <aside className="pointer-events-none absolute bottom-0 left-0 right-0 z-40">
-          <Card className="pointer-events-auto border bg-card/95 backdrop-blur">
-            <CardContent className="space-y-3 p-3">
-              <div className="flex justify-center -mt-1 -mx-3 mb-1 pt-1">
-                <div
-                  className="h-1.5 w-20 cursor-ns-resize rounded-full bg-border hover:bg-border/60 active:bg-primary/60 transition-colors"
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    timelineResizeRef.current = {
-                      startY: event.clientY,
-                      startHeight: timelinePanelHeight,
-                    };
-                  }}
-                  title="Drag to resize timeline height"
-                />
-              </div>
+        <aside
+          ref={(el) => {
+            if (!el) return;
+            const ro = new ResizeObserver(([entry]) => setTimelineActualHeight(entry.contentRect.height));
+            ro.observe(el);
+          }}
+          className="pointer-events-none absolute bottom-0 z-40"
+          style={{ left: 0, right: 0 }}
+        >
+          {/* Top edge resize handle — matches sidebar handle style */}
+          <div
+            className="pointer-events-auto absolute left-0 right-0 top-0 z-10 h-1 cursor-ns-resize transition-colors hover:bg-primary/30 active:bg-primary/60"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              timelineResizeRef.current = { startY: e.clientY, startHeight: timelinePanelHeight };
+            }}
+          />
+          <Card className="pointer-events-auto rounded-none border bg-card/95 backdrop-blur">
+            <CardContent className="space-y-2 px-3 py-2">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
-                  <div className="text-xs font-medium">Timeline</div>
                   <Button
                     size="sm"
                     variant="outline"
@@ -4713,15 +5153,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                   <Label htmlFor="timeline-length" className="text-xs text-muted-foreground">
                     Length (vh)
                   </Label>
-                  <Input
-                    id="timeline-length"
-                    type="number"
-                    min={50}
-                    max={5000}
-                    step={10}
+                  <TimelineLengthInput
                     value={timelineLengthVh}
-                    onChange={(event) => updateTimelineLengthVh(event.target.value)}
-                    className="h-8 w-24 text-xs"
+                    onChange={updateTimelineLengthVh}
                   />
                   <Button
                     size="sm"
@@ -4754,7 +5188,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                   return (
                     <div
                       ref={setTimelineScrollEl}
-                      className="overflow-auto"
+                      className="overflow-auto timeline-scroll"
                       style={{ maxHeight: `${timelinePanelHeight}px` }}
                       onDragStart={(e) => e.preventDefault()}
                     >
@@ -4834,6 +5268,49 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                             style={selectedLayerId === row.layer.id ? { boxShadow: "inset 3px 0 0 hsl(var(--primary))" } : undefined}
                           >
                             {row.kind === "layer" ? (
+                              row.layer.id === CAMERA_LAYER_ID ? (
+                                // ── Camera pseudo-layer row ─────────────────────────────
+                                <div
+                                  data-layer-id={row.layer.id}
+                                  className="sticky left-0 z-20 flex h-8 items-center gap-1 border-r bg-card px-2 text-xs"
+                                  style={{ backgroundColor: "rgba(59, 130, 246, 0.08)" }}
+                                >
+                                  <Camera className="h-3.5 w-3.5 shrink-0 text-blue-400" />
+                                  <Button
+                                    data-no-drag="true"
+                                    type="button"
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 w-6 p-0"
+                                    onClick={() =>
+                                      setTimelineExpandedLayerIds((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(CAMERA_LAYER_ID)) next.delete(CAMERA_LAYER_ID);
+                                        else next.add(CAMERA_LAYER_ID);
+                                        return next;
+                                      })
+                                    }
+                                  >
+                                    {timelineExpandedLayerIds.has(CAMERA_LAYER_ID) ? (
+                                      <ChevronDown className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <ChevronRight className="h-3.5 w-3.5" />
+                                    )}
+                                  </Button>
+                                  {animationTracks.some(
+                                    (t) => t.layerId === CAMERA_LAYER_ID && t.keyframes.length > 0
+                                  ) ? (
+                                    <span
+                                      className="inline-block h-2 w-2 shrink-0 rotate-45 bg-amber-400/80"
+                                      title="Has keyframes"
+                                    />
+                                  ) : (
+                                    <span className="inline-block h-2 w-2 shrink-0" />
+                                  )}
+                                  <span className="min-w-0 flex-1 truncate text-blue-300/90">Camera</span>
+                                </div>
+                              ) : (
+                              // ── Normal mesh layer row ───────────────────────────────
                               <div
                                 data-layer-id={row.layer.id}
                                 className={cn(
@@ -4983,6 +5460,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                                   onCheckedChange={(checked) => setLayerVisibility(row.layer.id, checked)}
                                 />
                               </div>
+                            )
                             ) : (
                               <div
                                 className="sticky left-0 z-20 flex h-7 min-w-0 items-center gap-1 border-r bg-card px-2 text-[11px] text-muted-foreground"
@@ -5084,31 +5562,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                                     </>
                                   ) : null}
                                 </div>
-                                <Input
-                                  type="number"
-                                  step={getTimelinePropertyStep(row.propertyId)}
+                                <PropertyNumberInput
                                   value={getTimelinePropertyValue(row.layer, row.propertyId)}
-                                  onFocus={() => beginTimelinePropertyEdit(row.layer, row.propertyId)}
-                                  onBlur={() => {
-                                    modifierInputTypingRef.current = false;
-                                    commitTimelinePropertyEdit(row.layer, row.propertyId);
-                                  }}
-                                  onKeyDown={(event) => {
-                                    const isTypingKey =
-                                      /^[0-9.\-eE]$/.test(event.key) ||
-                                      event.key === "Backspace" ||
-                                      event.key === "Delete";
-                                    modifierInputTypingRef.current = isTypingKey;
-                                    if (event.key === "Enter") event.currentTarget.blur();
-                                  }}
-                                  onChange={(event) => {
-                                    applyTimelinePropertyValue(row.layer, row.propertyId, event.target.value);
-                                    if (!modifierInputTypingRef.current) {
-                                      upsertKeyframeAtCurrentTime(row.layer, row.propertyId, true);
-                                    }
-                                    modifierInputTypingRef.current = false;
-                                  }}
-                                  className="h-6 w-24 shrink-0 text-[11px]"
+                                  step={getTimelinePropertyStep(row.propertyId)}
+                                  onBeginEdit={() => beginTimelinePropertyEdit(row.layer, row.propertyId)}
+                                  onApply={(raw) => applyTimelinePropertyValue(row.layer, row.propertyId, raw)}
+                                  onCommit={() => commitTimelinePropertyEdit(row.layer, row.propertyId)}
                                 />
                               </div>
                             )}
@@ -5576,6 +6035,41 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       ) : null}
 
       {/* ── Skills modal ───────────────────────────────────────────── */}
+      {/* ── Help modal ─────────────────────────────────────────────── */}
+      {helpOpen && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
+          onPointerDown={() => setHelpOpen(false)}
+        >
+          <div
+            className="flex flex-col rounded-xl border border-border bg-card shadow-2xl overflow-hidden"
+            style={{ width: 740, maxHeight: "82vh" }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <HelpCircle className="h-4 w-4 text-zinc-400" />
+                <h2 className="text-sm font-semibold">Help</h2>
+              </div>
+              <button
+                type="button"
+                className="rounded p-1 hover:bg-muted"
+                onClick={() => setHelpOpen(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-8 py-6">
+              {helpMd ? <HelpContent md={helpMd} /> : (
+                <p className="text-zinc-400 text-sm">Loading…</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {aiSettingsOpen && <AiKeySettings onClose={() => setAiSettingsOpen(false)} />}
+
       {skillsOpen && (
         <div
           className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60"
