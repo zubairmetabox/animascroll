@@ -196,7 +196,8 @@ For multi-phase animations (e.g. closed → explode → hold → close):
 - For rotation, values can go beyond 360 for multiple spins.
 
 ## Response Format
-ONLY output valid JSON — no markdown, no explanation outside the JSON:
+CRITICAL: ALWAYS respond with ONLY valid JSON — even for follow-up or correction requests.
+Never write natural language outside the JSON object. No markdown, no preamble, no explanation:
 {
   "message": "Brief friendly explanation of what you did (1–3 sentences)",
   "operations": [
@@ -357,8 +358,10 @@ export async function POST(req: NextRequest) {
 
     const raw = completion.choices[0]?.message?.content ?? "";
 
-    // Strip accidental markdown fences
-    const jsonStr = raw.replace(/^```(?:json)?\n?/m, "").replace(/\n?```$/m, "").trim();
+    // Strip markdown fences, then try to extract a JSON object if the model added surrounding text
+    const stripped = raw.replace(/^```(?:json)?\n?/m, "").replace(/\n?```$/m, "").trim();
+    const jsonObjectMatch = stripped.match(/\{[\s\S]*\}/);
+    const jsonStr = jsonObjectMatch ? jsonObjectMatch[0] : stripped;
 
     let parsed: { message: string; operations: Operation[] };
     try {
