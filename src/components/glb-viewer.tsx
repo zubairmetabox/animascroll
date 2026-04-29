@@ -1266,9 +1266,11 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
     // Body height = timeline length + one extra viewport so the final frame is reachable
     const prevBodyHeight = document.body.style.height;
-    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevHtmlOverflowX = document.documentElement.style.overflowX;
+    const prevHtmlOverflowY = document.documentElement.style.overflowY;
     document.body.style.height = `${timelineLengthVh + 100}vh`;
-    document.documentElement.style.overflow = "auto";
+    document.documentElement.style.overflowX = "hidden";
+    document.documentElement.style.overflowY = "auto";
 
     const onScroll = () => {
       const maxScroll = (timelineLengthVh / 100) * window.innerHeight;
@@ -1288,7 +1290,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       document.body.style.height = prevBodyHeight;
-      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.documentElement.style.overflowX = prevHtmlOverflowX;
+      document.documentElement.style.overflowY = prevHtmlOverflowY;
       window.scrollTo(0, 0);
     };
   }, [viewMode, timelineLengthVh]);
@@ -1414,11 +1417,11 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
       }
       if (leftPanelResizeDragRef.current) {
         const { startX, startWidth } = leftPanelResizeDragRef.current;
-        setLeftPanelWidth(THREE.MathUtils.clamp(startWidth + (event.clientX - startX), 160, 520));
+        setLeftPanelWidth(THREE.MathUtils.clamp(startWidth + (event.clientX - startX), 240, 520));
       }
       if (rightPanelResizeDragRef.current) {
         const { startX, startWidth } = rightPanelResizeDragRef.current;
-        setRightPanelWidth(THREE.MathUtils.clamp(startWidth - (event.clientX - startX), 160, 520));
+        setRightPanelWidth(THREE.MathUtils.clamp(startWidth - (event.clientX - startX), 240, 520));
       }
 
       const modifierDrag = timelineModifierDragRef.current;
@@ -4657,208 +4660,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             </>
           )}
 
-          <div className="mx-0.5 h-4 w-px bg-border/60" />
-          {/* File menu */}
-          <div className="relative">
-            <button
-              type="button"
-              className={cn(
-                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
-                fileMenuOpen && "bg-muted/80"
-              )}
-              onPointerDown={(e) => { e.stopPropagation(); setFileMenuOpen((v) => !v); setEditMenuOpen(false); setViewMenuOpen(false); }}
-            >
-              File <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-            </button>
-            {fileMenuOpen && (
-              <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg">
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel}
-                  onClick={() => { setFileMenuOpen(false); exportCurrentModel(); }}
-                >
-                  <Download className="mr-2 h-4 w-4" />
-                  Export Model
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel || animationTracks.length === 0}
-                  onClick={() => { setFileMenuOpen(false); exportHtmlAnimation(); }}
-                >
-                  <Code2 className="mr-2 h-4 w-4" />
-                  Export HTML Page
-                </button>
-                <div className="my-1 border-t border-border" />
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!currentProjectId || isModelUploading}
-                  onClick={() => { setFileMenuOpen(false); void saveToDb(); }}
-                >
-                  <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save</span>
-                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl S</kbd>
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!hasModel}
-                  onClick={() => { setFileMenuOpen(false); exportConfigToFile(); }}
-                >
-                  <Download className="mr-2 h-4 w-4" />
-                  Download Config…
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); guardUnsaved(loadFromFile); }}
-                >
-                  <FolderOpen className="mr-2 h-4 w-4" />
-                  Load Config…
-                </button>
-                <div className="my-1 border-t border-border" />
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); setAiSettingsOpen(true); }}
-                >
-                  <Sparkles className="mr-2 h-4 w-4 text-primary" />
-                  AI Settings…
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); setSkillsOpen(true); }}
-                >
-                  <Sparkles className="mr-2 h-4 w-4" />
-                  Animation Skills…
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => { setFileMenuOpen(false); setLogsOpen(true); }}
-                >
-                  <Clock3 className="mr-2 h-4 w-4" />
-                  Logs
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => {
-                    setFileMenuOpen(false);
-                    if (!helpMd) fetch("/help.md").then((r) => r.text()).then(setHelpMd);
-                    setHelpOpen(true);
-                  }}
-                >
-                  <HelpCircle className="mr-2 h-4 w-4" />
-                  Help
-                </button>
-                <div className="my-1 border-t border-border" />
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                  onClick={() => {
-                    setFileMenuOpen(false);
-                    if (isModelUploading) { setUploadWarningOpen(true); return; }
-                    navigateToProjects();
-                  }}
-                >
-                  <X className="mr-2 h-4 w-4" />
-                  Close Project
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Edit menu */}
-          <div className="relative">
-            <button
-              type="button"
-              className={cn(
-                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
-                editMenuOpen && "bg-muted/80"
-              )}
-              onPointerDown={(e) => { e.stopPropagation(); setEditMenuOpen((v) => !v); setFileMenuOpen(false); setViewMenuOpen(false); }}
-            >
-              Edit <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-            </button>
-            {editMenuOpen && (
-              <div className="absolute left-0 top-full z-50 mt-1 w-48 rounded-md border border-border bg-card p-1 shadow-lg">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={undoCount === 0}
-                  onClick={() => { setEditMenuOpen(false); undoLayerChange(); }}
-                >
-                  <span className="flex items-center gap-2"><Undo2 className="h-4 w-4" /> Undo</span>
-                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl Z</kbd>
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={undoCount === 0}
-                  onClick={() => { setEditMenuOpen(false); resetLayerChanges(); }}
-                >
-                  <RotateCcw className="mr-2 h-4 w-4" />
-                  Reset All
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={redoCount === 0}
-                  onClick={() => { setEditMenuOpen(false); redoLayerChange(); }}
-                >
-                  <span className="flex items-center gap-2"><Redo2 className="h-4 w-4" /> Redo</span>
-                  <kbd className="font-sans text-xs text-muted-foreground">Ctrl Shift Z</kbd>
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* View menu */}
-          <div className="relative">
-            <button
-              type="button"
-              className={cn(
-                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
-                viewMenuOpen && "bg-muted/80"
-              )}
-              onPointerDown={(e) => { e.stopPropagation(); setViewMenuOpen((v) => !v); setFileMenuOpen(false); setEditMenuOpen(false); }}
-            >
-              View <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-            </button>
-            {viewMenuOpen && (
-              <div
-                className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg"
-                onPointerDown={(e) => e.stopPropagation()}
-              >
-                {(Object.keys(sectionMeta) as SectionId[]).map((id) => {
-                  const { label, icon } = sectionMeta[id];
-                  const visible = !hiddenSections.has(id);
-                  return (
-                    <button
-                      key={id}
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
-                      onClick={() => setHiddenSections((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(id)) next.delete(id); else next.add(id);
-                        return next;
-                      })}
-                    >
-                      <span className="flex h-4 w-4 items-center justify-center">
-                        {visible ? <Check className="h-3.5 w-3.5" /> : null}
-                      </span>
-                      {icon}
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
           {viewMode === "animate" && selectedLayerId ? (
             <>
               <div className="mx-1 h-4 w-px bg-border/60" />
@@ -4965,6 +4766,107 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("left", panelLayout.left.length); }}
         >
+          {/* ── File / Edit / View menus — sticky top of left sidebar ─── */}
+          <div className="sticky top-0 z-10 flex items-center gap-0.5 border-b border-border bg-[#0d1117] px-1 py-1">
+            {/* File menu */}
+            <div className="relative">
+              <button
+                type="button"
+                className={cn("flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors", fileMenuOpen && "bg-muted/80")}
+                onPointerDown={(e) => { e.stopPropagation(); setFileMenuOpen((v) => !v); setEditMenuOpen(false); setViewMenuOpen(false); }}
+              >
+                File <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+              {fileMenuOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!hasModel} onClick={() => { setFileMenuOpen(false); exportCurrentModel(); }}>
+                    <Download className="mr-2 h-4 w-4" />Export Model
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!hasModel || animationTracks.length === 0} onClick={() => { setFileMenuOpen(false); exportHtmlAnimation(); }}>
+                    <Code2 className="mr-2 h-4 w-4" />Export HTML Page
+                  </button>
+                  <div className="my-1 border-t border-border" />
+                  <button type="button" className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!currentProjectId || isModelUploading} onClick={() => { setFileMenuOpen(false); void saveToDb(); }}>
+                    <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save</span>
+                    <kbd className="font-sans text-xs text-muted-foreground">Ctrl S</kbd>
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={!hasModel} onClick={() => { setFileMenuOpen(false); exportConfigToFile(); }}>
+                    <Download className="mr-2 h-4 w-4" />Download Config…
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); guardUnsaved(loadFromFile); }}>
+                    <FolderOpen className="mr-2 h-4 w-4" />Load Config…
+                  </button>
+                  <div className="my-1 border-t border-border" />
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); setAiSettingsOpen(true); }}>
+                    <Sparkles className="mr-2 h-4 w-4 text-primary" />AI Settings…
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); setSkillsOpen(true); }}>
+                    <Sparkles className="mr-2 h-4 w-4" />Animation Skills…
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); setLogsOpen(true); }}>
+                    <Clock3 className="mr-2 h-4 w-4" />Logs
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); if (!helpMd) fetch("/help.md").then((r) => r.text()).then(setHelpMd); setHelpOpen(true); }}>
+                    <HelpCircle className="mr-2 h-4 w-4" />Help
+                  </button>
+                  <div className="my-1 border-t border-border" />
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); if (isModelUploading) { setUploadWarningOpen(true); return; } navigateToProjects(); }}>
+                    <X className="mr-2 h-4 w-4" />Close Project
+                  </button>
+                </div>
+              )}
+            </div>
+            {/* Edit menu */}
+            <div className="relative">
+              <button
+                type="button"
+                className={cn("flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors", editMenuOpen && "bg-muted/80")}
+                onPointerDown={(e) => { e.stopPropagation(); setEditMenuOpen((v) => !v); setFileMenuOpen(false); setViewMenuOpen(false); }}
+              >
+                Edit <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+              {editMenuOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 w-48 rounded-md border border-border bg-card p-1 shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+                  <button type="button" className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={undoCount === 0} onClick={() => { setEditMenuOpen(false); undoLayerChange(); }}>
+                    <span className="flex items-center gap-2"><Undo2 className="h-4 w-4" /> Undo</span>
+                    <kbd className="font-sans text-xs text-muted-foreground">Ctrl Z</kbd>
+                  </button>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={undoCount === 0} onClick={() => { setEditMenuOpen(false); resetLayerChanges(); }}>
+                    <RotateCcw className="mr-2 h-4 w-4" />Reset All
+                  </button>
+                  <button type="button" className="flex w-full items-center justify-between rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" disabled={redoCount === 0} onClick={() => { setEditMenuOpen(false); redoLayerChange(); }}>
+                    <span className="flex items-center gap-2"><Redo2 className="h-4 w-4" /> Redo</span>
+                    <kbd className="font-sans text-xs text-muted-foreground">Ctrl Shift Z</kbd>
+                  </button>
+                </div>
+              )}
+            </div>
+            {/* View menu */}
+            <div className="relative">
+              <button
+                type="button"
+                className={cn("flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors", viewMenuOpen && "bg-muted/80")}
+                onPointerDown={(e) => { e.stopPropagation(); setViewMenuOpen((v) => !v); setFileMenuOpen(false); setEditMenuOpen(false); }}
+              >
+                View <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+              {viewMenuOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+                  {(Object.keys(sectionMeta) as SectionId[]).map((id) => {
+                    const { label, icon } = sectionMeta[id];
+                    const visible = !hiddenSections.has(id);
+                    return (
+                      <button key={id} type="button" className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => setHiddenSections((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; })}>
+                        <span className="flex h-4 w-4 items-center justify-center">{visible ? <Check className="h-3.5 w-3.5" /> : null}</span>
+                        {icon}{label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
           {renderPanel("left")}
         </aside>
       ) : null}
@@ -4985,59 +4887,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           className="absolute right-4 top-0 h-9 z-[60] flex items-center gap-1 px-1 py-0"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          {viewMode === "animate" && modelScene ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-              title="Fit camera to model and save as preview camera"
-              onClick={fitModelToCamera}
-            >
-              <Maximize2 className="h-3.5 w-3.5" />
-            </Button>
-          ) : null}
-          {viewMode === "animate" ? (
-            <Button
-              size="sm"
-              variant={pinnedCameraView ? "outline" : "secondary"}
-              className={cn(
-                "h-7",
-                pinnedCameraView
-                  ? "border-primary/50 text-primary hover:bg-primary/10"
-                  : "text-muted-foreground"
-              )}
-              title={pinnedCameraView ? "Update saved preview camera" : "Save current view as preview camera"}
-              onClick={() => {
-                const controls = orbitControlsRef.current;
-                const camera = cameraRef.current;
-                if (!controls || !camera) return;
-                setPinnedCameraView({
-                  position: [camera.position.x, camera.position.y, camera.position.z],
-                  target: [controls.target.x, controls.target.y, controls.target.z],
-                  fov: camera.fov,
-                  zoom: camera.zoom,
-                });
-                setHasUnsavedChanges(true); scheduleAutosave();
-              }}
-            >
-              <Camera className="mr-1.5 h-3.5 w-3.5" />
-              Set Preview Camera
-            </Button>
-          ) : null}
-          {viewMode === "animate" && pinnedCameraView ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 w-7 p-0 text-primary hover:bg-primary/10"
-              title="Return to saved preview angle"
-              onClick={() => applyCameraView(pinnedCameraView)}
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-            </Button>
-          ) : null}
-          {viewMode === "animate" ? (
-            <div className="mx-0.5 h-4 w-px bg-border/60" />
-          ) : null}
           <Button
             size="sm"
             className="h-7"
@@ -5174,6 +5023,59 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("right", panelLayout.right.length); }}
         >
+          {/* ── Camera controls — sticky top of right sidebar ─── */}
+          {viewMode === "animate" && (
+            <div className="sticky top-0 z-10 flex items-center gap-1 border-b border-border bg-[#0d1117] px-2 py-1.5">
+              {modelScene ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                  title="Fit camera to model"
+                  onClick={fitModelToCamera}
+                >
+                  <Maximize2 className="h-3.5 w-3.5" />
+                </Button>
+              ) : null}
+              <Button
+                size="sm"
+                variant={pinnedCameraView ? "outline" : "secondary"}
+                className={cn(
+                  "h-7 flex-1 text-xs",
+                  pinnedCameraView
+                    ? "border-primary/50 text-primary hover:bg-primary/10"
+                    : "text-muted-foreground"
+                )}
+                title={pinnedCameraView ? "Update saved preview camera" : "Save current view as preview camera"}
+                onClick={() => {
+                  const controls = orbitControlsRef.current;
+                  const camera = cameraRef.current;
+                  if (!controls || !camera) return;
+                  setPinnedCameraView({
+                    position: [camera.position.x, camera.position.y, camera.position.z],
+                    target: [controls.target.x, controls.target.y, controls.target.z],
+                    fov: camera.fov,
+                    zoom: camera.zoom,
+                  });
+                  setHasUnsavedChanges(true); scheduleAutosave();
+                }}
+              >
+                <Camera className="mr-1.5 h-3.5 w-3.5" />
+                Set Preview Camera
+              </Button>
+              {pinnedCameraView ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0 text-primary hover:bg-primary/10"
+                  title="Return to saved preview angle"
+                  onClick={() => applyCameraView(pinnedCameraView)}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </Button>
+              ) : null}
+            </div>
+          )}
 
           {renderPanel("right")}
           {false && <div className={isFramed ? "" : "overflow-hidden rounded-xl border border-border bg-card/95 backdrop-blur-sm w-[280px]"}>
@@ -5364,7 +5266,6 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             <CardContent className="space-y-2 px-3 py-2">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
-                  <div className="text-xs font-medium">Timeline</div>
                   <Button
                     size="sm"
                     variant="outline"
