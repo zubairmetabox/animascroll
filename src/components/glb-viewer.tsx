@@ -4759,13 +4759,13 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       {hasModel && viewMode === "animate" ? (
         <aside
-          className="absolute z-50 overflow-y-auto border-r border-border bg-[#0d1117]"
-          style={{ top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" }}
+          className="absolute z-50 flex flex-col border-r border-border bg-[#0d1117]"
+          style={{ top: FRAMED_TOP, left: 0, width: leftPanelWidth, bottom: timelineActualHeight }}
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("left", panelLayout.left.length); }}
         >
-          {/* ── File / Edit / View menus — sticky top of left sidebar ─── */}
-          <div className="sticky top-0 z-10 flex items-center gap-0.5 border-b border-border bg-[#0d1117] px-1 py-1">
+          {/* ── File / Edit / View menus — top of left sidebar ─── */}
+          <div className="shrink-0 flex items-center gap-0.5 border-b border-border bg-[#0d1117] px-1 py-1">
             {/* File menu */}
             <div className="relative">
               <button
@@ -4865,7 +4865,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             </div>
           </div>
 
-          {renderPanel("left")}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            {renderPanel("left")}
+          </div>
         </aside>
       ) : null}
 
@@ -5016,14 +5018,14 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
 
       {hasModel && viewMode !== "preview" ? (
         <aside
-          className="absolute z-50 overflow-y-auto border-l border-border bg-[#0d1117]"
-          style={{ top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: timelineActualHeight, overflowX: "hidden" }}
+          className="absolute z-50 flex flex-col border-l border-border bg-[#0d1117]"
+          style={{ top: FRAMED_TOP, right: 0, width: rightPanelWidth, bottom: timelineActualHeight }}
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); if (panelDragIdRef.current) handlePanelDrop("right", panelLayout.right.length); }}
         >
-          {/* ── Camera controls — sticky top of right sidebar ─── */}
+          {/* ── Camera controls — top of right sidebar ─── */}
           {viewMode === "animate" && (
-            <div className="sticky top-0 z-10 flex items-center gap-1 border-b border-border bg-[#0d1117] px-2 py-1.5">
+            <div className="shrink-0 flex items-center gap-1 border-b border-border bg-[#0d1117] px-2 py-1.5">
               {modelScene ? (
                 <Button
                   size="sm"
@@ -5075,7 +5077,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             </div>
           )}
 
-          {renderPanel("right")}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            {renderPanel("right")}
+          </div>
         </aside>
       ) : null}
 
