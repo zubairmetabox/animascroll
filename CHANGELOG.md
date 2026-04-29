@@ -7,7 +7,7 @@ All notable changes to Animascroll are documented here.
 ## [Unreleased]
 
 ### Added
-- **View menu** in left sidebar header — toggle any panel (History, Environment, Variables, AI Animator, Navigation, Lighting, Additional Light Sources) on/off; state persisted to user prefs
+- **View menu** in left sidebar header — toggle any panel (History, Environment, Variables, AI Animator, Camera Controls, Lighting, Additional Light Sources) on/off; state persisted to user prefs
 - **File / Edit / View menus** moved from top bar into a sticky strip at the top of the left sidebar
 - **Camera controls** (Fit, Set Preview Camera, Reset Angle) moved from top bar into a sticky strip at the top of the right sidebar
 - **Full-width timeline** — timeline now spans the full viewport width; sidebars sit above it and stop at the timeline's top edge

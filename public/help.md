@@ -7,7 +7,7 @@
 Animascroll has two editor modes, toggled with the buttons in the top-right bar.
 
 ### Animate Mode
-The default editing mode. **OrbitControls are active** — you can freely orbit, pan, and zoom the viewport with your mouse. The timeline, layer panel, and all editing controls are visible. Use this mode to build your animation and explore the scene.
+The default editing mode. You can freely **orbit, pan, and zoom** the viewport with your mouse. The timeline, layer panel, and all editing controls are visible. Use this mode to build your animation and explore the scene.
 
 > To lock in a camera angle for Preview, click **Set Preview Camera** after positioning the viewport.
 
@@ -25,7 +25,7 @@ Click the project name to rename it inline. Press **Enter** or click away to sav
 
 | Item | Notes |
 |---|---|
-| **Export Model** | Downloads the current scene as a GLB file |
+| **Export Model** | Downloads the current scene as a GLB file (original format preserved) |
 | **Export HTML Page** | Downloads a self-contained HTML animation file (requires at least one animation track) |
 | **Save** `Ctrl S` | Saves your animation config to the cloud |
 | **Download Config…** | Downloads a JSON snapshot of all settings, lights, camera, and tracks |
@@ -53,9 +53,10 @@ Visible when a project is open. Opens a popover:
 - **When sharing is on**: Shows the public link with a copy button, and a **Stop sharing** option. The indicator dot turns green when public.
 
 ### Set Preview Camera & Reset
+Located at the top of the right sidebar (visible in Animate mode).
 - **Set Preview Camera**: Saves the current viewport angle as the locked camera for Preview mode and the share page. Updates to **"Update saved preview camera"** once set.
 - **↩ Reset button**: Returns the viewport to the saved preview angle.
-- **Fit Camera** (animate mode): Fits the entire model in view and saves that angle as the preview camera.
+- **Fit Camera** (⤢ icon): Fits the entire model in view.
 
 ### Animate / Preview Toggle
 Switches between Animate and Preview modes.
@@ -119,7 +120,7 @@ Hold **Ctrl** and click multiple layer rows to select them. Then right-click →
 
 ## Timeline
 
-The timeline runs along the bottom of the screen. Drag the **pill handle** at the top edge to resize it (minimum 28px, maximum 560px).
+The timeline runs along the bottom of the screen. Drag the **top edge** to resize it (minimum 28px, maximum 560px).
 
 ### Layout
 ```
@@ -212,7 +213,7 @@ Open by clicking **Customize** in the right sidebar.
 - **Background color** — hex color picker (also applied to exports and share page)
 - **Show grid** — toggle the viewport grid
 
-### Navigation
+### Camera Controls
 - **Enable zoom** — allows scroll-wheel zoom in the viewport
 - **Auto rotate** — continuously rotates the camera around the model
 

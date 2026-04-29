@@ -64,7 +64,7 @@ src/
 │   ├── layout.tsx
 │   └── page.tsx            # Landing page
 ├── components/
-│   ├── glb-viewer.tsx      # Main editor (scene, timeline, AI chat, all UI)
+│   ├── model-editor.tsx    # Main editor (scene, timeline, AI chat, all UI)
 │   ├── skills-manager.tsx  # Animation Skills UI
 │   └── ui/                 # Shared UI primitives
 └── lib/
