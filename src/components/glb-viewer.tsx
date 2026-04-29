@@ -1037,6 +1037,8 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [editMenuOpen, setEditMenuOpen] = useState(false);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const [hiddenSections, setHiddenSections] = useState<Set<SectionId>>(new Set());
   const [logsOpen, setLogsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
@@ -1375,11 +1377,11 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
   }, [kfContextMenu]);
 
   useEffect(() => {
-    if (!fileMenuOpen && !editMenuOpen && !shareMenuOpen) return;
-    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); setShareMenuOpen(false); };
+    if (!fileMenuOpen && !editMenuOpen && !viewMenuOpen && !shareMenuOpen) return;
+    const close = () => { setFileMenuOpen(false); setEditMenuOpen(false); setViewMenuOpen(false); setShareMenuOpen(false); };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
-  }, [fileMenuOpen, editMenuOpen, shareMenuOpen]);
+  }, [fileMenuOpen, editMenuOpen, viewMenuOpen, shareMenuOpen]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -2153,6 +2155,9 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
           if (typeof prefs.sectionsOpen.aiAnimator === "boolean") setAiAnimatorOpen(prefs.sectionsOpen.aiAnimator);
           if (typeof prefs.sectionsOpen.history === "boolean") setHistoryOpen(prefs.sectionsOpen.history);
         }
+        if (Array.isArray(prefs.hiddenSections)) {
+          setHiddenSections(new Set(prefs.hiddenSections as SectionId[]));
+        }
         uiPrefsLoadedRef.current = true;
       })
       .catch(() => { uiPrefsLoadedRef.current = true; });
@@ -2180,11 +2185,12 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
             aiAnimator: aiAnimatorOpen,
             history: historyOpen,
           },
+          hiddenSections: [...hiddenSections],
         }),
       }).catch(() => {});
     }, 1000);
     return () => { if (uiPrefsSaveTimerRef.current) clearTimeout(uiPrefsSaveTimerRef.current); };
-  }, [workspace, leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showNav, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen]);
+  }, [workspace, leftPanelWidth, rightPanelWidth, panelLayout, showEnv, showNav, showLighting, showPointLights, showVariables, aiAnimatorOpen, historyOpen, hiddenSections]);
 
   useEffect(() => {
     if (animationTracks.length === 0) return;
@@ -4365,7 +4371,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
     const ids = panelLayout[side];
     return (
       <div className={isFramed ? "" : "overflow-hidden rounded-xl border border-border bg-card/95 backdrop-blur-sm w-[280px]"}>
-        {ids.map((id, idx) => {
+        {ids.filter((id) => !hiddenSections.has(id)).map((id, idx) => {
           const meta = sectionMeta[id];
           const [open, setOpen] = sectionOpenState[id];
           const isDragging = panelDragIdRef.current === id;
@@ -4671,7 +4677,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                 "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
                 fileMenuOpen && "bg-muted/80"
               )}
-              onPointerDown={(e) => { e.stopPropagation(); setFileMenuOpen((v) => !v); setEditMenuOpen(false); }}
+              onPointerDown={(e) => { e.stopPropagation(); setFileMenuOpen((v) => !v); setEditMenuOpen(false); setViewMenuOpen(false); }}
             >
               File <ChevronDown className="h-3.5 w-3.5 opacity-70" />
             </button>
@@ -4784,7 +4790,7 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                 "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
                 editMenuOpen && "bg-muted/80"
               )}
-              onPointerDown={(e) => { e.stopPropagation(); setEditMenuOpen((v) => !v); setFileMenuOpen(false); }}
+              onPointerDown={(e) => { e.stopPropagation(); setEditMenuOpen((v) => !v); setFileMenuOpen(false); setViewMenuOpen(false); }}
             >
               Edit <ChevronDown className="h-3.5 w-3.5 opacity-70" />
             </button>
@@ -4817,6 +4823,49 @@ export function GlbViewer({ initialProjectId }: { initialProjectId?: string }) {
                   <span className="flex items-center gap-2"><Redo2 className="h-4 w-4" /> Redo</span>
                   <kbd className="font-sans text-xs text-muted-foreground">Ctrl Shift Z</kbd>
                 </button>
+              </div>
+            )}
+          </div>
+
+          {/* View menu */}
+          <div className="relative">
+            <button
+              type="button"
+              className={cn(
+                "flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium hover:bg-muted/80 transition-colors",
+                viewMenuOpen && "bg-muted/80"
+              )}
+              onPointerDown={(e) => { e.stopPropagation(); setViewMenuOpen((v) => !v); setFileMenuOpen(false); setEditMenuOpen(false); }}
+            >
+              View <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+            </button>
+            {viewMenuOpen && (
+              <div
+                className="absolute left-0 top-full z-50 mt-1 w-52 rounded-md border border-border bg-card p-1 shadow-lg"
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                {(Object.keys(sectionMeta) as SectionId[]).map((id) => {
+                  const { label, icon } = sectionMeta[id];
+                  const visible = !hiddenSections.has(id);
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted"
+                      onClick={() => setHiddenSections((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(id)) next.delete(id); else next.add(id);
+                        return next;
+                      })}
+                    >
+                      <span className="flex h-4 w-4 items-center justify-center">
+                        {visible ? <Check className="h-3.5 w-3.5" /> : null}
+                      </span>
+                      {icon}
+                      {label}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
