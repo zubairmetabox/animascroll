@@ -369,7 +369,7 @@ export function AiChatPanel({
     if (visionOn) screenshot = captureScreenshot() ?? undefined;
 
     try {
-      const res = await fetch("/api/animate", {
+      const res = await fetch("/api/ai/animate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

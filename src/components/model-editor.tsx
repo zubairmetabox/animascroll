@@ -2390,7 +2390,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     // Quota check — only for new uploads, not when opening existing projects
     if (!projectOpenOptions) {
       try {
-        const quotaRes = await fetch("/api/upload");
+        const quotaRes = await fetch("/api/models/upload");
         if (quotaRes.ok) {
           const { usedBytes, limitBytes } = await quotaRes.json() as { usedBytes: number; limitBytes: number };
           if (usedBytes + file.size > limitBytes) {
@@ -2593,7 +2593,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
 
             const blob = await upload(pathname, file, {
               access: "public",
-              handleUploadUrl: "/api/upload",
+              handleUploadUrl: "/api/models/upload",
               contentType: uploadContentType,
             });
             await fetch(`/api/projects/${currentProjectId}`, {

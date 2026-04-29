@@ -411,7 +411,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ message: parsed.message, operations: parsed.operations });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[/api/animate]", err);
+    console.error("[/api/ai/animate]", err);
     return NextResponse.json(
       { error: process.env.NODE_ENV === "development" ? message : "Internal server error" },
       { status: 500 }
