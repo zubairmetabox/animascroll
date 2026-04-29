@@ -6,6 +6,18 @@ All notable changes to Animascroll are documented here.
 
 ## [Unreleased]
 
+### Refactoring
+- Renamed `glb-viewer.tsx` → `model-editor.tsx`, `GlbViewer` → `ModelEditor`
+- Renamed types: `ViewerSettings` → `SceneSettings`, `CameraView` → `SavedCameraState`, `ConfigPayload` → `SceneConfigPayload`, `pinnedCamera` → `pinnedCameraView` in `ExportConfig`
+- Renamed `"navigation"` section → `"cameraControls"` throughout (SectionId, state, label, uiPrefs)
+- Renamed functions: `navigateTrackKeyframe` → `seekToKeyframe`, `navigateToProjects` → `returnToProjects`, `applyConfigPayload` → `loadConfigFromJson`
+- Renamed `glbDataUrl` → `modelDataUrl`, `GLB_DATA_URL` → `MODEL_DATA_URL`, `"GLB load error"` → `"Model load error"`
+- Renamed state: `showEnv` → `showEnvironment`, `configDirty` → `hasConfigChanges`
+- localStorage key `"glb_tool_viewer_config_v1"` → `"animascroll_config_v1"`
+- Extracted shared types (`EasingType`, `Keyframe`, `Operation`, `AnimationTrack`, `LayerItem`, `SceneSettings`, `PointLightConfig`) into `src/lib/types.ts`
+- Renamed API routes: `/api/animate` → `/api/ai/animate`, `/api/upload` → `/api/models/upload`
+- Extracted rate limiting logic into `src/lib/rate-limiting.ts`
+
 ### Added
 - **View menu** in left sidebar header — toggle any panel (History, Environment, Variables, AI Animator, Camera Controls, Lighting, Additional Light Sources) on/off; state persisted to user prefs
 - **File / Edit / View menus** moved from top bar into a sticky strip at the top of the left sidebar
