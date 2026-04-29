@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { head } from "@vercel/blob";
 import type { SkillIndex } from "@/lib/skills";
+import type { Keyframe, Operation, SceneSettings, PointLightConfig } from "@/lib/types";
 import { sql } from "@/lib/db";
 
 // ── User AI settings ───────────────────────────────────────────────────────
@@ -21,17 +22,7 @@ async function getUserAiSettings(userId: string): Promise<{ key: string | null; 
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────
-
-type Keyframe = { atVh: number; value: number; easing?: string };
-
-type Operation =
-  | { type: "set_track"; layerName: string; propertyId: string; keyframes: Keyframe[] }
-  | { type: "delete_track"; layerName: string; propertyId: string }
-  | { type: "clear_all" }
-  | { type: "set_timeline_length"; vh: number }
-  | { type: "set_scene"; settings: Record<string, unknown> }
-  | { type: "set_point_light"; index: number; patch: Record<string, unknown> }
-  | { type: "exploded_view"; vh: number; multiplier?: number };
+// Keyframe, Operation, SceneSettings, PointLightConfig imported from @/lib/types
 
 type LayerInfo = {
   name: string;
@@ -56,17 +47,7 @@ type PointLightInfo = {
   distance: number;
 };
 
-type SceneSettings = {
-  backgroundColor: string;
-  showGrid: boolean;
-  useAmbientLight: boolean;
-  ambientIntensity: number;
-  useDirectionalLight: boolean;
-  directionalIntensity: number;
-  directionalX: number;
-  directionalY: number;
-  directionalZ: number;
-};
+// SceneSettings imported from @/lib/types
 
 type SceneContext = {
   timelineLengthVh: number;

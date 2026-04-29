@@ -53,6 +53,7 @@ import { useRouter } from "next/navigation";
 import { UserButton, useUser } from "@clerk/nextjs";
 import posthog from "posthog-js";
 import { AiChatPanel } from "@/components/ai-chat-panel";
+import type { EasingType, Keyframe, Operation, AnimationTrack, LayerItem, SceneSettings, PointLightConfig } from "@/lib/types";
 import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -68,35 +69,7 @@ import { generateAnimationHtml, type ExportConfig } from "@/lib/generate-animati
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-type SceneSettings = {
-  backgroundColor: string;
-  showGrid: boolean;
-  useAmbientLight: boolean;
-  ambientIntensity: number;
-  useDirectionalLight: boolean;
-  directionalIntensity: number;
-  directionalX: number;
-  directionalY: number;
-  directionalZ: number;
-  orbitEnableZoom: boolean;
-  orbitAutoRotate: boolean;
-  useEnvironmentMap: boolean;
-  environmentPreset: string;
-  environmentIntensity: number;
-  toneMappingExposure: number;
-};
-
-type PointLightConfig = {
-  id: string;
-  enabled: boolean;
-  color: string;
-  intensity: number;
-  x: number;
-  y: number;
-  z: number;
-  distance: number;
-  decay: number;
-};
+// SceneSettings, PointLightConfig imported from @/lib/types
 
 type LayerTransform = {
   layerName: string;
@@ -116,20 +89,7 @@ type SceneConfigPayload = {
 };
 
 
-type LayerItem = {
-  id: string;
-  parentId: string | null;
-  name: string;
-  type: string;
-  depth: number;
-  hasChildren: boolean;
-  visible: boolean;
-  opacity: number;
-  position: { x: number; y: number; z: number };
-  rotation: { x: number; y: number; z: number };
-  scale: { x: number; y: number; z: number };
-  worldPosition: { x: number; y: number; z: number };
-};
+// LayerItem imported from @/lib/types
 
 type LayerSnapshot = Record<
   string,
@@ -152,20 +112,8 @@ type HistoryEntry = {
   cameraView?: SavedCameraState;
 };
 
-type EasingType = "linear" | "easeIn" | "easeOut" | "easeInOut" | "easeInOutCubic";
-
-type AnimationKeyframe = {
-  atVh: number;
-  value: number;
-  easing?: EasingType;
-};
-
-type AnimationTrack = {
-  layerId: string;
-  layerName?: string; // saved for remapping when UUIDs differ on re-upload
-  propertyId: string;
-  keyframes: AnimationKeyframe[];
-};
+// EasingType, Keyframe, AnimationTrack imported from @/lib/types
+type AnimationKeyframe = Keyframe; // local alias — easing is EasingType (subset of string)
 
 type ViewMode = "animate" | "preview";
 type SectionId = "history" | "environment" | "cameraControls" | "lighting" | "pointLights" | "variables" | "aiAnimator";

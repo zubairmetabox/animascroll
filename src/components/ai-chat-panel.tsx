@@ -5,62 +5,11 @@ import { Camera, ChevronDown, ChevronRight, Info, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import type { Keyframe, Operation, AnimationTrack, LayerItem, SceneSettings, PointLightConfig } from "@/lib/types";
 
 // ── Types ─────────────────────────────────────────────────────────────────
-
-type Keyframe = { atVh: number; value: number; easing?: string };
-
-type Operation =
-  | { type: "set_track"; layerName: string; propertyId: string; keyframes: Keyframe[] }
-  | { type: "delete_track"; layerName: string; propertyId: string }
-  | { type: "clear_all" }
-  | { type: "set_timeline_length"; vh: number }
-  | { type: "set_scene"; settings: Record<string, unknown> }
-  | { type: "set_point_light"; index: number; patch: Record<string, unknown> }
-  | { type: "exploded_view"; vh: number; multiplier?: number };
-
-type AnimationTrack = {
-  layerId: string;
-  layerName?: string;
-  propertyId: string;
-  keyframes: Keyframe[];
-};
-
-type LayerItem = {
-  id: string;
-  parentId: string | null;
-  name: string;
-  type: string;
-  depth: number;
-  position: { x: number; y: number; z: number };
-  rotation: { x: number; y: number; z: number };
-  scale: { x: number; y: number; z: number };
-  worldPosition: { x: number; y: number; z: number };
-};
-
-type SceneSettings = {
-  backgroundColor: string;
-  showGrid: boolean;
-  useAmbientLight: boolean;
-  ambientIntensity: number;
-  useDirectionalLight: boolean;
-  directionalIntensity: number;
-  directionalX: number;
-  directionalY: number;
-  directionalZ: number;
-};
-
-type PointLightConfig = {
-  id: string;
-  enabled: boolean;
-  color: string;
-  intensity: number;
-  x: number;
-  y: number;
-  z: number;
-  distance: number;
-  decay: number;
-};
+// Keyframe, Operation, AnimationTrack, LayerItem, SceneSettings, PointLightConfig
+// imported from @/lib/types
 
 type ChatMessage = {
   id: string;
