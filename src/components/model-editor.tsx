@@ -1016,7 +1016,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   const [animationTracks, setAnimationTracks] = useState<AnimationTrack[]>([]);
   const [selectedKfIds, setSelectedKfIds] = useState<Set<string>>(new Set());
   const [rubberBandVh, setRubberBandVh] = useState<{ a: number; b: number; top: number; bottom: number; startX: number; endX: number } | null>(null);
-  const [showEnvironment, setShowEnv] = useState(true);
+  const [showEnvironment, setShowEnvironment] = useState(true);
   const [showCameraControls, setShowCameraControls] = useState(false);
   const [showLighting, setShowLighting] = useState(true);
   const [showPointLights, setShowPointLights] = useState(false);
@@ -2143,9 +2143,13 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
         if (!prefs) return;
         if (typeof prefs.leftPanelWidth === "number") setLeftPanelWidth(prefs.leftPanelWidth);
         if (typeof prefs.rightPanelWidth === "number") setRightPanelWidth(prefs.rightPanelWidth);
-        if (prefs.panelLayout?.left && prefs.panelLayout?.right) setPanelLayout(prefs.panelLayout);
+        if (prefs.panelLayout?.left && prefs.panelLayout?.right) {
+          // Migrate old "navigation" SectionId → "cameraControls"
+          const migrate = (ids: string[]) => ids.map((id) => id === "navigation" ? "cameraControls" : id) as SectionId[];
+          setPanelLayout({ left: migrate(prefs.panelLayout.left), right: migrate(prefs.panelLayout.right) });
+        }
         if (prefs.sectionsOpen) {
-          if (typeof prefs.sectionsOpen.environment === "boolean") setShowEnv(prefs.sectionsOpen.environment);
+          if (typeof prefs.sectionsOpen.environment === "boolean") setShowEnvironment(prefs.sectionsOpen.environment);
           if (typeof prefs.sectionsOpen.cameraControls === "boolean") setShowCameraControls(prefs.sectionsOpen.cameraControls);
           if (typeof prefs.sectionsOpen.lighting === "boolean") setShowLighting(prefs.sectionsOpen.lighting);
           if (typeof prefs.sectionsOpen.pointLights === "boolean") setShowPointLights(prefs.sectionsOpen.pointLights);
@@ -2154,7 +2158,8 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
           if (typeof prefs.sectionsOpen.history === "boolean") setHistoryOpen(prefs.sectionsOpen.history);
         }
         if (Array.isArray(prefs.hiddenSections)) {
-          setHiddenSections(new Set(prefs.hiddenSections as SectionId[]));
+          const migrated = (prefs.hiddenSections as string[]).map((id) => id === "navigation" ? "cameraControls" : id) as SectionId[];
+          setHiddenSections(new Set(migrated));
         }
         uiPrefsLoadedRef.current = true;
       })
@@ -4210,7 +4215,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
 
   const sectionOpenState: Record<SectionId, [boolean, (v: boolean) => void]> = {
     history: [historyOpen, setHistoryOpen],
-    environment: [showEnvironment, setShowEnv],
+    environment: [showEnvironment, setShowEnvironment],
     cameraControls: [showCameraControls, setShowCameraControls],
     lighting: [showLighting, setShowLighting],
     pointLights: [showPointLights, setShowPointLights],
