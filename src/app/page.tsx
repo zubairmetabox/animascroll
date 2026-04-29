@@ -96,7 +96,7 @@ export default function LandingPage() {
             <span className="ml-3 text-xs text-zinc-600">animascroll.io/app</span>
           </div>
           <img
-            src="/temp/animascroll.png"
+            src="/images/animascroll.png"
             alt="Animascroll editor"
             className="w-full block"
           />
