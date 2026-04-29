@@ -4329,9 +4329,6 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
           return (
             <div
               key={id}
-              draggable
-              onDragStart={(e) => { e.stopPropagation(); panelDragIdRef.current = id; e.dataTransfer.effectAllowed = "move"; }}
-              onDragEnd={() => { panelDragIdRef.current = null; setDropIndicator(null); }}
               onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDropIndicator({ panel: side, idx }); }}
               onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handlePanelDrop(side, idx); }}
               className={cn("border-b border-border/50 group/section", isDragging && "opacity-30")}
@@ -4344,7 +4341,15 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
               >
                 <span className="flex items-center gap-2">{meta.icon}{meta.label}</span>
                 <span className="flex items-center gap-1">
-                  <GripVertical className="h-3.5 w-3.5 text-muted-foreground/0 group-hover/section:text-muted-foreground/50 transition-colors cursor-grab" onPointerDown={(e) => e.stopPropagation()} />
+                  <span
+                    draggable
+                    onDragStart={(e) => { e.stopPropagation(); panelDragIdRef.current = id; e.dataTransfer.effectAllowed = "move"; }}
+                    onDragEnd={() => { panelDragIdRef.current = null; setDropIndicator(null); }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="cursor-grab"
+                  >
+                    <GripVertical className="h-3.5 w-3.5 text-muted-foreground/0 group-hover/section:text-muted-foreground/50 transition-colors" />
+                  </span>
                   {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
                 </span>
               </button>
