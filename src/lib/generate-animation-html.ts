@@ -8,7 +8,7 @@ export type ExportConfig = {
   tracks: { layerName: string; propertyId: string; keyframes: { atVh: number; value: number; easing: string }[] }[];
 };
 
-export function generateAnimationHtml(glbDataUrl: string, cfg: ExportConfig): string {
+export function generateAnimationHtml(modelDataUrl: string, cfg: ExportConfig): string {
   const cfgJson = JSON.stringify(cfg);
   return `<!DOCTYPE html>
 <html lang="en">
@@ -39,7 +39,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const CFG = ${cfgJson};
-const GLB_DATA_URL = '${glbDataUrl}';
+const MODEL_DATA_URL = '${modelDataUrl}';
 
 function applyEasing(t, easing) {
   switch (easing) {
@@ -240,7 +240,7 @@ function applyTracks() {
 }
 
 const loader = new GLTFLoader();
-loader.load(GLB_DATA_URL, function(gltf) {
+loader.load(MODEL_DATA_URL, function(gltf) {
   scene.add(gltf.scene);
 
   // Centre at world origin — matches Drei's <Center> in the editor so
@@ -258,7 +258,7 @@ loader.load(GLB_DATA_URL, function(gltf) {
   applyTracks();
   requestAnimationFrame(render);
 }, undefined, function(err) {
-  console.error('GLB load error', err);
+  console.error('Model load error', err);
 });
 
 function render() {

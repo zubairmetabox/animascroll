@@ -1830,7 +1830,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     pushHistory(enabled ? "Enable animation" : "Disable animation", newTracks);
   };
 
-  const navigateTrackKeyframe = (
+  const seekToKeyframe = (
     layerId: string,
     propertyId: string,
     direction: "prev" | "next"
@@ -2710,7 +2710,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     });
   };
 
-  const applySceneConfigPayload = (text: string): { ok: boolean; message: string } => {
+  const loadConfigFromJson = (text: string): { ok: boolean; message: string } => {
     try {
       const parsed = JSON.parse(text) as SceneConfigPayload;
       if (!parsed || typeof parsed !== "object") throw new Error("Invalid JSON root.");
@@ -2785,7 +2785,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   };
 
   const applyConfigFromText = () => {
-    const result = applySceneConfigPayload(configText);
+    const result = loadConfigFromJson(configText);
     if (result.ok) setConfigDirty(false);
     setConfigMessage(result.message);
   };
@@ -2948,7 +2948,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
         for (let i = 0; i < bytes.byteLength; i++) {
           binary += String.fromCharCode(bytes[i]);
         }
-        const glbDataUrl = `data:model/gltf-binary;base64,${btoa(binary)}`;
+        const modelDataUrl = `data:model/gltf-binary;base64,${btoa(binary)}`;
         const cfg: ExportConfig = {
           backgroundColor: settings.backgroundColor,
           useAmbientLight: settings.useAmbientLight,
@@ -2966,7 +2966,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
             keyframes: t.keyframes.map(({ atVh, value, easing }) => ({ atVh, value, easing: easing ?? "linear" })),
           })),
         };
-        const html = generateAnimationHtml(glbDataUrl, cfg);
+        const html = generateAnimationHtml(modelDataUrl, cfg);
         const blob2 = new Blob([html], { type: "text/html" });
         const url = URL.createObjectURL(blob2);
         const a = document.createElement("a");
@@ -2992,7 +2992,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
     const reader = new FileReader();
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
-      const result = applySceneConfigPayload(text);
+      const result = loadConfigFromJson(text);
       if (result.ok) {
         setConfigText(text);
         setConfigDirty(false);
@@ -3014,7 +3014,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
   };
 
   // Navigate back to projects, guarding against in-progress model upload.
-  const navigateToProjects = () => {
+  const returnToProjects = () => {
     if (isModelUploading) {
       setUploadWarningOpen(true);
       return;
@@ -4610,7 +4610,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
           <button
             type="button"
             className="flex items-center rounded-md px-2 hover:bg-muted/60 transition-colors"
-            onPointerDown={(e) => { e.stopPropagation(); navigateToProjects(); }}
+            onPointerDown={(e) => { e.stopPropagation(); returnToProjects(); }}
           >
             <Logo variant="light" markHeight="h-4" />
           </button>
@@ -4808,7 +4808,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
                     <HelpCircle className="mr-2 h-4 w-4" />Help
                   </button>
                   <div className="my-1 border-t border-border" />
-                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); if (isModelUploading) { setUploadWarningOpen(true); return; } navigateToProjects(); }}>
+                  <button type="button" className="flex w-full items-center rounded-sm px-3 py-1.5 text-left text-sm hover:bg-muted" onClick={() => { setFileMenuOpen(false); if (isModelUploading) { setUploadWarningOpen(true); return; } returnToProjects(); }}>
                     <X className="mr-2 h-4 w-4" />Close Project
                   </button>
                 </div>
@@ -5524,7 +5524,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
                                         size="sm"
                                         variant="ghost"
                                         className="h-4 w-4 p-0"
-                                        onClick={() => navigateTrackKeyframe(row.layer.id, row.propertyId, "prev")}
+                                        onClick={() => seekToKeyframe(row.layer.id, row.propertyId, "prev")}
                                         title="Previous keyframe"
                                       >
                                         <ChevronLeft className="h-3 w-3" />
@@ -5558,7 +5558,7 @@ export function ModelEditor({ initialProjectId }: { initialProjectId?: string })
                                         size="sm"
                                         variant="ghost"
                                         className="h-4 w-4 p-0"
-                                        onClick={() => navigateTrackKeyframe(row.layer.id, row.propertyId, "next")}
+                                        onClick={() => seekToKeyframe(row.layer.id, row.propertyId, "next")}
                                         title="Next keyframe"
                                       >
                                         <ChevronRight className="h-3 w-3" />
